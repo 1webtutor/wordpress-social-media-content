@@ -24,13 +24,14 @@ class SCA_API_Service {
 	/**
 	 * Syncs all configured platforms.
 	 *
+	 * @param bool $force_refresh Skip transient cache when true.
 	 * @return void
 	 */
-	public function sync_all_platform_posts() {
+	public function sync_all_platform_posts( $force_refresh = false ) {
 		$platforms = array( 'instagram', 'facebook', 'pinterest' );
 
 		foreach ( $platforms as $platform ) {
-			$posts = $this->fetch_platform_posts( $platform );
+			$posts = $this->fetch_platform_posts( $platform, $force_refresh );
 			if ( is_wp_error( $posts ) || empty( $posts ) ) {
 				continue;
 			}
@@ -45,12 +46,19 @@ class SCA_API_Service {
 	 * Returns platform posts using cached transient.
 	 *
 	 * @param string $platform Platform key.
+	 * @param bool   $force_refresh Skip transient cache when true.
 	 * @return array<int,array<string,mixed>>|WP_Error
 	 */
-	public function fetch_platform_posts( $platform ) {
+	public function fetch_platform_posts( $platform, $force_refresh = false ) {
+		$settings      = get_option( self::OPTION_KEY, array() );
+		$cache_ttl     = isset( $settings['cache_ttl'] ) ? max( 300, absint( $settings['cache_ttl'] ) ) : HOUR_IN_SECONDS;
 		$transient_key = 'sca_api_' . sanitize_key( $platform );
-		$cached        = get_transient( $transient_key );
 
+		if ( $force_refresh ) {
+			delete_transient( $transient_key );
+		}
+
+		$cached = get_transient( $transient_key );
 		if ( false !== $cached && is_array( $cached ) ) {
 			return $cached;
 		}
@@ -70,7 +78,7 @@ class SCA_API_Service {
 		}
 
 		if ( ! is_wp_error( $posts ) ) {
-			set_transient( $transient_key, $posts, HOUR_IN_SECONDS );
+			set_transient( $transient_key, $posts, $cache_ttl );
 		}
 
 		return $posts;
@@ -85,14 +93,16 @@ class SCA_API_Service {
 		$settings   = get_option( self::OPTION_KEY, array() );
 		$account_id = isset( $settings['instagram_account_id'] ) ? $settings['instagram_account_id'] : '';
 		$token      = isset( $settings['meta_access_token'] ) ? $settings['meta_access_token'] : '';
+		$sync_limit = isset( $settings['sync_limit'] ) ? max( 1, min( 50, absint( $settings['sync_limit'] ) ) ) : 25;
 
 		if ( empty( $account_id ) || empty( $token ) ) {
 			return new WP_Error( 'sca_missing_instagram_credentials', __( 'Instagram API credentials are not configured.', 'social-content-aggregator' ) );
 		}
 
 		$url = sprintf(
-			'https://graph.facebook.com/v20.0/%1$s/media?fields=id,caption,media_url,media_type,permalink,timestamp,like_count,comments_count&access_token=%2$s',
+			'https://graph.facebook.com/v20.0/%1$s/media?fields=id,caption,media_url,media_type,permalink,timestamp,like_count,comments_count&limit=%2$d&access_token=%3$s',
 			rawurlencode( $account_id ),
+			$sync_limit,
 			rawurlencode( $token )
 		);
 
@@ -107,17 +117,19 @@ class SCA_API_Service {
 	 * @return array<int,array<string,mixed>>|WP_Error
 	 */
 	private function fetch_facebook_posts() {
-		$settings = get_option( self::OPTION_KEY, array() );
-		$page_id  = isset( $settings['facebook_page_id'] ) ? $settings['facebook_page_id'] : '';
-		$token    = isset( $settings['meta_access_token'] ) ? $settings['meta_access_token'] : '';
+		$settings   = get_option( self::OPTION_KEY, array() );
+		$page_id    = isset( $settings['facebook_page_id'] ) ? $settings['facebook_page_id'] : '';
+		$token      = isset( $settings['meta_access_token'] ) ? $settings['meta_access_token'] : '';
+		$sync_limit = isset( $settings['sync_limit'] ) ? max( 1, min( 50, absint( $settings['sync_limit'] ) ) ) : 25;
 
 		if ( empty( $page_id ) || empty( $token ) ) {
 			return new WP_Error( 'sca_missing_facebook_credentials', __( 'Facebook API credentials are not configured.', 'social-content-aggregator' ) );
 		}
 
 		$url = sprintf(
-			'https://graph.facebook.com/v20.0/%1$s/posts?fields=id,message,permalink_url,created_time,full_picture,likes.summary(true),comments.summary(true)&access_token=%2$s',
+			'https://graph.facebook.com/v20.0/%1$s/posts?fields=id,message,permalink_url,created_time,full_picture,likes.summary(true),comments.summary(true)&limit=%2$d&access_token=%3$s',
 			rawurlencode( $page_id ),
+			$sync_limit,
 			rawurlencode( $token )
 		);
 
@@ -161,15 +173,16 @@ class SCA_API_Service {
 	 * @return array<int,array<string,mixed>>|WP_Error
 	 */
 	private function fetch_pinterest_posts() {
-		$settings = get_option( self::OPTION_KEY, array() );
-		$board_id = isset( $settings['pinterest_board_id'] ) ? $settings['pinterest_board_id'] : '';
-		$token    = isset( $settings['pinterest_access_token'] ) ? $settings['pinterest_access_token'] : '';
+		$settings   = get_option( self::OPTION_KEY, array() );
+		$board_id   = isset( $settings['pinterest_board_id'] ) ? $settings['pinterest_board_id'] : '';
+		$token      = isset( $settings['pinterest_access_token'] ) ? $settings['pinterest_access_token'] : '';
+		$sync_limit = isset( $settings['sync_limit'] ) ? max( 1, min( 50, absint( $settings['sync_limit'] ) ) ) : 25;
 
 		if ( empty( $board_id ) || empty( $token ) ) {
 			return new WP_Error( 'sca_missing_pinterest_credentials', __( 'Pinterest API credentials are not configured.', 'social-content-aggregator' ) );
 		}
 
-		$url      = sprintf( 'https://api.pinterest.com/v5/boards/%s/pins?page_size=25', rawurlencode( $board_id ) );
+		$url      = sprintf( 'https://api.pinterest.com/v5/boards/%s/pins?page_size=%d', rawurlencode( $board_id ), $sync_limit );
 		$response = wp_remote_get(
 			esc_url_raw( $url ),
 			array(
@@ -192,13 +205,13 @@ class SCA_API_Service {
 
 		$normalized = array();
 		foreach ( $body['items'] as $item ) {
-			$description  = isset( $item['description'] ) ? (string) $item['description'] : '';
-			$title        = isset( $item['title'] ) ? (string) $item['title'] : '';
-			$caption      = trim( $title . ' ' . $description );
-			$media_url    = '';
-			$media_type   = 'IMAGE';
-			$like_count   = isset( $item['pin_metrics']['save_count'] ) ? (int) $item['pin_metrics']['save_count'] : 0;
-			$comment_count= isset( $item['pin_metrics']['comment_count'] ) ? (int) $item['pin_metrics']['comment_count'] : 0;
+			$description   = isset( $item['description'] ) ? (string) $item['description'] : '';
+			$title         = isset( $item['title'] ) ? (string) $item['title'] : '';
+			$caption       = trim( $title . ' ' . $description );
+			$media_url     = '';
+			$media_type    = 'IMAGE';
+			$like_count    = isset( $item['pin_metrics']['save_count'] ) ? (int) $item['pin_metrics']['save_count'] : 0;
+			$comment_count = isset( $item['pin_metrics']['comment_count'] ) ? (int) $item['pin_metrics']['comment_count'] : 0;
 
 			if ( isset( $item['media']['images']['originals']['url'] ) ) {
 				$media_url = $item['media']['images']['originals']['url'];

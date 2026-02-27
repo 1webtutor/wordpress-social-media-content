@@ -41,7 +41,8 @@ class SCA_Shortcode {
 
 		$limit    = absint( $atts['limit'] );
 		$platform = sanitize_key( $atts['platform'] );
-		$sort     = 'recent' === $atts['sort'] ? 'recent' : 'engagement';
+		$sort_raw = sanitize_key( $atts['sort'] );
+		$sort     = 'recent' === $sort_raw ? 'recent' : 'engagement';
 		$hashtag  = ltrim( sanitize_text_field( $atts['hashtag'] ), '#' );
 
 		$meta_query = array();
@@ -63,8 +64,11 @@ class SCA_Shortcode {
 		$query_args = array(
 			'post_type'      => 'social_posts',
 			'posts_per_page' => $limit > 0 ? $limit : 6,
-			'meta_query'     => $meta_query,
 		);
+
+		if ( ! empty( $meta_query ) ) {
+			$query_args['meta_query'] = $meta_query;
+		}
 
 		if ( 'engagement' === $sort ) {
 			$query_args['meta_key'] = '_sca_engagement_score';

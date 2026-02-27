@@ -61,6 +61,10 @@ class SCA_Plugin {
 	 * @return void
 	 */
 	public static function activate() {
+		$cpt = new SCA_CPT();
+		$cpt->register();
+		flush_rewrite_rules();
+
 		if ( ! wp_next_scheduled( 'sca_refresh_posts_event' ) ) {
 			wp_schedule_event( time(), 'sca_every_two_hours', 'sca_refresh_posts_event' );
 		}
@@ -76,6 +80,8 @@ class SCA_Plugin {
 		if ( $timestamp ) {
 			wp_unschedule_event( $timestamp, 'sca_refresh_posts_event' );
 		}
+
+		flush_rewrite_rules();
 	}
 
 	/**

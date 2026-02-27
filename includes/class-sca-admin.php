@@ -68,6 +68,7 @@ class SCA_Admin {
 		);
 
 		$fields = array(
+
 			'facebook_page_id'       => array(
 				'label' => esc_html__( 'Facebook Page ID', 'social-content-aggregator' ),
 				'type'  => 'text',
@@ -111,6 +112,20 @@ class SCA_Admin {
 				$key,
 				$field['label'],
 				array( $this, 'render_field' ),
+			'facebook_page_id'       => esc_html__( 'Facebook Page ID', 'social-content-aggregator' ),
+			'instagram_account_id'   => esc_html__( 'Instagram Business Account ID', 'social-content-aggregator' ),
+			'pinterest_board_id'     => esc_html__( 'Pinterest Board ID', 'social-content-aggregator' ),
+			'meta_access_token'      => esc_html__( 'Meta Access Token', 'social-content-aggregator' ),
+			'pinterest_access_token' => esc_html__( 'Pinterest Access Token', 'social-content-aggregator' ),
+			'cache_ttl'              => esc_html__( 'Cache TTL (seconds)', 'social-content-aggregator' ),
+			'sync_limit'             => esc_html__( 'Sync Limit Per Platform', 'social-content-aggregator' ),
+		);
+
+		foreach ( $fields as $key => $label ) {
+			add_settings_field(
+				$key,
+				$label,
+				array( $this, 'render_text_field' ),
 				'sca-settings',
 				'sca_api_section',
 				array(

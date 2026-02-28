@@ -1,0 +1,487 @@
+# Social Content Aggregator
+
+A production-ready WordPress plugin that aggregates social content from:
+
+- **Meta Graph API** (Instagram Business + Facebook Page)
+- **Pinterest API v5**
+- **Optional RSS/Atom feeds**
+- **Optional scraping fallback** (used when API credentials are not configured)
+
+It stores imported content in WordPress, applies caption/hashtag processing, and publishes according to configurable workflow rules (draft, immediate publish, or scheduled).
+
+---
+
+## Features
+
+## 1) Admin Settings (Settings → Social Aggregator)
+
+Configure all ingestion and publishing behavior from one settings page:
+
+- Facebook Page ID
+- Instagram Business Account ID
+- Pinterest Board ID
+- Meta Access Token (preserved if left blank on update)
+- Pinterest Access Token (preserved if left blank on update)
+- Cache TTL (seconds)
+- Sync limit per platform
+- Minimum engagement threshold
+- Publishing mode:
+  - Save as Draft
+  - Publish Immediately
+  - Schedule Automatically
+- Schedule time (HH:MM)
+- Schedule frequency (Once / Daily / Weekly)
+- Target post type (loaded dynamically from all public post types)
+- RSS/Atom feed ingestion toggle + fallback feed URLs
+- Scraping toggle + scrape URLs
+- Hashtag blacklist
+- Manual **Sync Now** button with nonce and capability checks
+
+---
+
+## 2) Source Priority Logic (API first when configured)
+
+The plugin auto-selects ingestion source per platform:
+
+- If platform API credentials are present → uses official API.
+- If credentials are missing → uses scraping fallback for that platform (if enabled and URLs are provided).
+
+This means first-time setups can start with scraping URLs, then transparently switch to API-backed ingestion once credentials are configured.
+
+---
+
+## 3) API Integrations
+
+### Instagram (Meta Graph)
+Fetches media fields including:
+
+- caption
+- media_url
+- media_type
+- permalink
+- timestamp
+- like_count
+- comments_count
+
+### Facebook (Meta Graph)
+Fetches page post data including:
+
+- message (caption)
+- permalink_url
+- created_time
+- full_picture
+- likes.summary(true)
+- comments.summary(true)
+
+### Pinterest API v5
+Fetches board pin data including:
+
+- title + description
+- media image URL
+- link
+- created_at
+- metrics (save/comment counts where available)
+
+All API requests use `wp_remote_get()`.
+
+---
+
+## 4) Feed + Scrape Fallbacks
+
+### RSS/Atom feed ingestion
+- Uses WordPress feed parser (`fetch_feed`)
+- Maps feed items to normalized post payloads
+- Supports feed URL list in settings
+
+### Scraping fallback
+- Optional fallback parser for configured URLs
+- Extracts basic title/og:image data from HTML
+- Uses transients for caching
+- Intended for scenarios where credentials are not yet configured
+
+---
+
+## 5) Processing Pipeline
+
+Imported items are normalized and passed through:
+
+1. Deduplication (permalink/external ID)
+2. Engagement filtering (`like_count + comments_count` >= threshold)
+3. Caption cleaning
+4. Hashtag extraction + blacklist filtering
+5. Trending hashtag update and optional top-hashtag append
+6. Link removal enforcement
+7. Scheduled/publish/draft post argument generation
+8. CPT/post persistence and media handling
+
+---
+
+## 6) Caption Cleaning + Link Removal
+
+Before save/publish, content processor removes:
+
+- URLs
+- `<a>` anchor tags
+- emails
+- @mentions
+- UTM/tracking fragments
+- extra whitespace
+
+Output is sanitized/plain readable content.
+
+---
+
+## 7) Hashtag Engine + Trending Table
+
+The plugin includes a hashtag engine that:
+
+- Extracts hashtags with regex
+- Normalizes to lowercase
+- Removes duplicates
+- Filters blacklist terms and common noise tags
+- Stores usage/engagement stats in custom table:
+  - `{$wpdb->prefix}social_hashtags`
+
+Trending tags are ranked by:
+
+- `avg_engagement DESC`
+- `usage_count DESC`
+
+---
+
+## 8) Publishing Modes + Scheduler
+
+Publishing behavior is controlled via settings:
+
+- **Draft** → creates draft posts
+- **Publish** → publishes immediately
+- **Schedule** → creates `future` posts with computed `post_date`
+
+Scheduler supports:
+
+- once
+- daily
+- weekly
+
+Timezone compatibility uses `current_time('timestamp')`.
+
+---
+
+## 9) Custom Post Type + Metadata
+
+Registers `social_posts` CPT and stores:
+
+- external ID
+- original URL
+- platform
+- engagement score
+- likes/comments
+- source (`api` / `feed` / `scrape`)
+- timestamp
+- hashtags
+
+### Media handling
+- Uses `media_sideload_image()`
+- File type validation
+- Prevent duplicate media downloads by source URL meta
+- Sets featured image automatically
+
+---
+
+## 10) Shortcode
+
+Use:
+
+```text
+[social_posts platform="instagram" sort="engagement" limit="6" hashtag="marketing" source="api"]
+```
+
+Supported attributes:
+
+- `platform` (instagram|facebook|pinterest|external)
+- `sort` (engagement|recent)
+- `limit`
+- `hashtag`
+- `source` (api|feed|scrape)
+
+Output:
+
+- responsive card grid
+- featured image (if available)
+- caption excerpt
+- engagement count
+- original post link
+
+---
+
+## 11) Security and Reliability
+
+- Settings sanitization for all fields
+- Tokens preserved safely when left blank
+- Admin capability checks (`manage_options`)
+- Nonce verification for manual sync
+- Escaped front-end/admin output
+- Transients for API/feed/scrape caching
+- Basic sync rate limiting via transient counter
+- Logging support using `error_log()`
+
+---
+
+## 12) Cron Events
+
+- `sca_refresh_posts_event` (every 2 hours)
+- `sca_scheduled_publish_event` (daily/weekly when schedule mode requires)
+
+On activation:
+
+- Registers CPT
+- Creates hashtag table via `dbDelta`
+- Schedules periodic sync event
+
+On deactivation:
+
+- Unschedules plugin cron events
+- Flushes rewrite rules
+
+---
+
+## File Structure
+
+```text
+social-content-aggregator.php
+includes/
+  class-sca-plugin.php
+  class-sca-admin.php
+  class-sca-api-service.php
+  class-sca-scheduler.php
+  class-sca-content-processor.php
+  class-sca-hashtag-engine.php
+  class-sca-cpt.php
+  class-sca-shortcode.php
+```
+
+---
+
+## Installation
+
+1. Copy plugin directory to `wp-content/plugins/social-content-aggregator`.
+2. Activate **Social Content Aggregator** from WordPress Plugins page.
+3. Open **Settings → Social Aggregator**.
+4. Add API credentials and/or fallback sources.
+5. Run **Sync Now** to import immediately.
+
+---
+
+## Notes
+
+- For production use, prefer official APIs over scraping.
+- Ensure all external integrations comply with provider terms and legal requirements.
+- Keep access tokens secure and rotate periodically.
+
+---
+
+## 13) Keyword-Based Smart Scheduler (API Only)
+
+A new **Keyword Scheduler** screen is available at:
+
+- **Social Aggregator → Keyword Scheduler**
+
+You can create keyword jobs with:
+
+- keyword text (e.g., `actor vijay`, `anime naruto`)
+- selected platforms (Instagram/Facebook/Pinterest)
+- target post type
+- publish mode (draft/publish/schedule)
+- schedule time (HH:MM)
+- minimum engagement score
+- max posts per fetch
+- frequency (daily/weekly)
+
+### Keyword scheduler DB schema
+
+- `{$wpdb->prefix}social_keyword_schedulers`
+  - `id`
+  - `keyword`
+  - `platforms`
+  - `post_type`
+  - `publish_mode`
+  - `schedule_time`
+  - `min_engagement`
+  - `max_posts`
+  - `frequency`
+  - `is_active`
+  - `created_at`
+
+### Keyword scheduler logs schema
+
+- `{$wpdb->prefix}social_keyword_logs`
+  - `id`
+  - `keyword`
+  - `fetched_count`
+  - `published_count`
+  - `skipped_count`
+  - `last_run`
+  - `notes`
+
+### Relevance + Ranking
+
+For each fetched API item:
+
+- `relevance_score = calculate_relevance_score(content, keyword)`
+- `engagement_score = like_count + comments_count`
+- `final_score = (relevance_score * 0.6) + (engagement_score * 0.4)`
+
+Items under relevance threshold (`< 50`) are dropped.
+
+### Keyword scheduler cron
+
+- Event: `sca_keyword_scheduler_event` (hourly)
+- Executes all active keyword configs
+- Applies frequency gate (daily/weekly)
+- Inserts posts with configured mode and schedule time
+
+### Duplicate prevention
+
+Before insert, checks are performed using:
+
+- original permalink (`_sca_original_url`)
+- content hash (`_sca_content_hash`)
+- media source URL (`_sca_source_media_url`)
+
+### Accuracy verification
+
+- Built-in relevance scoring is always used.
+- Optional AI verification hook is provided:
+  - `sca_keyword_ai_verify` filter
+  - return `true/false` to allow/deny publishing.
+
+### Important
+
+Keyword Scheduler pipeline is **API-only**:
+
+- uses official API-backed fetch methods
+- does not use scraping paths for keyword jobs
+
+---
+
+## 14) Decodo + Apify + Scrape.do Integration (Pooled Scraper Layer)
+
+The plugin now supports three external scraping providers as optional data-acquisition backends:
+
+- **Decodo API**
+- **Apify API**
+- **Scrape.do API**
+
+### Admin controls
+
+In **Social Aggregator → General Settings**, you can set:
+
+- Decodo API key
+- Apify API token
+- Scrape.do API token
+- Monthly API call limit per provider:
+  - `decodo_monthly_limit`
+  - `apify_monthly_limit`
+  - `scrape_do_monthly_limit`
+
+### Pooling behavior
+
+When scraper-backed fetching is needed, requests are distributed in a provider pool (round-robin style) across enabled providers that still have available monthly quota.
+
+### Monthly limit tracking
+
+- Usage is tracked in option: `sca_scraper_monthly_usage`
+- Counts auto-reset when month changes (`Y-m` bucket)
+- Provider calls are blocked after configured monthly limit is reached
+
+### Keyword scheduler relevance with pooled sources
+
+For keyword workflows, fetch logic is:
+
+1. Use official platform APIs when credentials exist.
+2. If unavailable/empty, fallback to pooled provider sources.
+3. Compute:
+   - `relevance_score`
+   - `engagement_score`
+   - `final_score = relevance*0.6 + engagement*0.4`
+4. Sort and take top-N.
+
+---
+
+## Additional Suggestions / Future Enhancements
+
+1. **Provider Health Dashboard**
+   - Show per-provider success/error rate and remaining monthly quota in admin.
+
+2. **Queue-aware Backoff**
+   - Add exponential retry/backoff for transient network failures on provider APIs.
+
+3. **Provider Priority Weights**
+   - Allow admin-defined weights (e.g., Apify 60%, Decodo 30%, Scrape.do 10%) in pooling strategy.
+
+4. **Per-Keyword Provider Override**
+   - Let each keyword scheduler choose allowed providers and per-keyword call budget.
+
+5. **Editorial Review Workflow**
+   - Add optional confidence threshold to force low-confidence posts to draft regardless of publish mode.
+
+6. **Structured Log Explorer**
+   - Build admin log filters by keyword/platform/provider/date with CSV export.
+
+7. **REST Endpoint for Scheduler Stats**
+   - Expose keyword scheduler metrics to headless dashboards.
+
+---
+
+## 15) Content Workbench (Keyword Preview + Edit + Import)
+
+A dedicated admin page is now available:
+
+- **Social Aggregator → Content Workbench**
+
+This page helps you validate retrieval quality and scraper/provider health before publishing.
+
+### What you can do on this page
+
+1. Enter a keyword and fetch preview results.
+2. Choose platforms and max result count.
+3. Select visible columns in the result table.
+4. Inspect **which source/provider** returned each row (`api`, `decodo`, `apify`, `scrape_do`, etc.).
+5. Edit caption/content inline per row.
+6. Select only required rows and import into chosen post type/status.
+
+### Diagnostics built in
+
+- Source diagnostics summary is shown for the preview dataset.
+- This allows quick verification that:
+  - official API paths are working,
+  - pooled providers are active,
+  - fallback acquisition is functioning.
+
+### Why this is useful
+
+- Acts as an editorial quality gate before scheduling.
+- Helps operations teams detect provider outages or exhausted quotas.
+- Supports manual curation without leaving WordPress admin.
+
+---
+
+## More Related Suggestions
+
+1. **Provider Test Button per Service**
+   - Add explicit “Test Decodo / Test Apify / Test Scrape.do” buttons with latency and status feedback.
+
+2. **Column Templates**
+   - Save reusable column presets in Content Workbench (e.g., Moderation View, SEO View, Quick Publish View).
+
+3. **Bulk Rewrite Assistant**
+   - Add a pluggable pre-publish rewrite transform to normalize tone/length before import.
+
+4. **Quota Forecast Panel**
+   - Show estimated days-to-quota-exhaustion based on rolling call volume.
+
+5. **Auto-Draft Queue from Workbench**
+   - Allow selecting rows and sending directly to keyword scheduler queue as pre-approved draft jobs.
+
+6. **Provider-level Error Ledger**
+   - Persist provider errors for better troubleshooting and SLA tracking.

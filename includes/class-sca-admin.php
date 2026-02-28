@@ -68,6 +68,50 @@ class SCA_Admin {
 		);
 
 		$fields = array(
+
+			'facebook_page_id'       => array(
+				'label' => esc_html__( 'Facebook Page ID', 'social-content-aggregator' ),
+				'type'  => 'text',
+			),
+			'instagram_account_id'   => array(
+				'label' => esc_html__( 'Instagram Business Account ID', 'social-content-aggregator' ),
+				'type'  => 'text',
+			),
+			'pinterest_board_id'     => array(
+				'label' => esc_html__( 'Pinterest Board ID', 'social-content-aggregator' ),
+				'type'  => 'text',
+			),
+			'meta_access_token'      => array(
+				'label' => esc_html__( 'Meta Access Token', 'social-content-aggregator' ),
+				'type'  => 'password',
+			),
+			'pinterest_access_token' => array(
+				'label' => esc_html__( 'Pinterest Access Token', 'social-content-aggregator' ),
+				'type'  => 'password',
+			),
+			'cache_ttl'              => array(
+				'label' => esc_html__( 'Cache TTL (seconds)', 'social-content-aggregator' ),
+				'type'  => 'number',
+			),
+			'sync_limit'             => array(
+				'label' => esc_html__( 'Sync Limit Per Platform', 'social-content-aggregator' ),
+				'type'  => 'number',
+			),
+			'enable_feed_ingest'     => array(
+				'label' => esc_html__( 'Enable Feed Ingestion', 'social-content-aggregator' ),
+				'type'  => 'checkbox',
+			),
+			'fallback_feed_urls'     => array(
+				'label' => esc_html__( 'Fallback Feed URLs (one per line)', 'social-content-aggregator' ),
+				'type'  => 'textarea',
+			),
+		);
+
+		foreach ( $fields as $key => $field ) {
+			add_settings_field(
+				$key,
+				$field['label'],
+				array( $this, 'render_field' ),
 			'facebook_page_id'       => esc_html__( 'Facebook Page ID', 'social-content-aggregator' ),
 			'instagram_account_id'   => esc_html__( 'Instagram Business Account ID', 'social-content-aggregator' ),
 			'pinterest_board_id'     => esc_html__( 'Pinterest Board ID', 'social-content-aggregator' ),
@@ -86,7 +130,7 @@ class SCA_Admin {
 				'sca_api_section',
 				array(
 					'key'  => $key,
-					'type' => false !== strpos( $key, 'token' ) ? 'password' : 'text',
+					'type' => $field['type'],
 				)
 			);
 		}
@@ -109,9 +153,16 @@ class SCA_Admin {
 			'pinterest_access_token',
 			'cache_ttl',
 			'sync_limit',
+			'enable_feed_ingest',
+			'fallback_feed_urls',
 		);
 
 		foreach ( $keys as $key ) {
+			if ( 'enable_feed_ingest' === $key ) {
+				$sanitized[ $key ] = isset( $input[ $key ] ) ? '1' : '0';
+				continue;
+			}
+
 			if ( ! isset( $input[ $key ] ) ) {
 				continue;
 			}
@@ -123,15 +174,18 @@ class SCA_Admin {
 			}
 
 			if ( 'cache_ttl' === $key ) {
-				$ttl              = max( 300, absint( $value ) );
-				$sanitized[ $key ] = (string) $ttl;
+				$sanitized[ $key ] = (string) max( 300, absint( $value ) );
 				continue;
 			}
 
 			if ( 'sync_limit' === $key ) {
 				$limit             = absint( $value );
-				$limit             = $limit < 1 || $limit > 50 ? 25 : $limit;
-				$sanitized[ $key ] = (string) $limit;
+				$sanitized[ $key ] = (string) ( $limit < 1 || $limit > 50 ? 25 : $limit );
+				continue;
+			}
+
+			if ( 'fallback_feed_urls' === $key ) {
+				$sanitized[ $key ] = sanitize_textarea_field( wp_unslash( $input[ $key ] ) );
 				continue;
 			}
 
@@ -147,16 +201,16 @@ class SCA_Admin {
 	 * @return void
 	 */
 	public function render_section_text() {
-		echo '<p>' . esc_html__( 'Use OAuth-generated access tokens from official Meta and Pinterest APIs.', 'social-content-aggregator' ) . '</p>';
+		echo '<p>' . esc_html__( 'Use OAuth-generated access tokens from official APIs. Optional fallback feed ingestion supports RSS/Atom sources without scraping.', 'social-content-aggregator' ) . '</p>';
 	}
 
 	/**
-	 * Renders input field.
+	 * Renders a settings field.
 	 *
 	 * @param array<string,string> $args Field args.
 	 * @return void
 	 */
-	public function render_text_field( $args ) {
+	public function render_field( $args ) {
 		$options = get_option( self::OPTION_KEY, array() );
 		$key     = isset( $args['key'] ) ? $args['key'] : '';
 		$type    = isset( $args['type'] ) ? $args['type'] : 'text';
@@ -164,6 +218,27 @@ class SCA_Admin {
 
 		if ( in_array( $key, array( 'meta_access_token', 'pinterest_access_token' ), true ) ) {
 			$value = '';
+		}
+
+		if ( 'textarea' === $type ) {
+			printf(
+				'<textarea name="%1$s[%2$s]" class="large-text" rows="5">%3$s</textarea>',
+				esc_attr( self::OPTION_KEY ),
+				esc_attr( $key ),
+				esc_textarea( $value )
+			);
+			return;
+		}
+
+		if ( 'checkbox' === $type ) {
+			printf(
+				'<label><input type="checkbox" name="%1$s[%2$s]" value="1" %3$s /> %4$s</label>',
+				esc_attr( self::OPTION_KEY ),
+				esc_attr( $key ),
+				checked( '1', (string) $value, false ),
+				esc_html__( 'Enable importing from RSS/Atom feed URLs.', 'social-content-aggregator' )
+			);
+			return;
 		}
 
 		printf(
@@ -203,7 +278,7 @@ class SCA_Admin {
 			</form>
 			<hr />
 			<h2><?php echo esc_html__( 'Manual Sync', 'social-content-aggregator' ); ?></h2>
-			<p><?php echo esc_html__( 'Run an immediate sync from authorized APIs.', 'social-content-aggregator' ); ?></p>
+			<p><?php echo esc_html__( 'Run an immediate sync from authorized sources.', 'social-content-aggregator' ); ?></p>
 			<form action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" method="post">
 				<input type="hidden" name="action" value="sca_manual_sync" />
 				<?php wp_nonce_field( 'sca_manual_sync_action', 'sca_manual_sync_nonce' ); ?>

@@ -28,7 +28,8 @@ class SCA_API_Service {
 	 * @return void
 	 */
 	public function sync_all_platform_posts( $force_refresh = false ) {
-		$platforms = array( 'instagram', 'facebook', 'pinterest' );
+		$merged_posts = array();
+		$platforms    = array( 'instagram', 'facebook', 'pinterest' );
 
 		foreach ( $platforms as $platform ) {
 			$posts = $this->fetch_platform_posts( $platform, $force_refresh );
@@ -36,9 +37,17 @@ class SCA_API_Service {
 				continue;
 			}
 
-			foreach ( $posts as $post ) {
-				SCA_CPT::upsert_social_post( $post );
-			}
+			$merged_posts = array_merge( $merged_posts, $posts );
+		}
+
+		$fallback_posts = $this->fetch_fallback_feed_posts( $force_refresh );
+		if ( ! is_wp_error( $fallback_posts ) && ! empty( $fallback_posts ) ) {
+			$merged_posts = array_merge( $merged_posts, $fallback_posts );
+		}
+
+		$merged_posts = $this->deduplicate_posts( $merged_posts );
+		foreach ( $merged_posts as $post ) {
+			SCA_CPT::upsert_social_post( $post );
 		}
 	}
 
@@ -85,6 +94,147 @@ class SCA_API_Service {
 	}
 
 	/**
+	 * Fetches non-API feed posts (RSS/Atom) if enabled.
+	 *
+	 * @param bool $force_refresh Skip transient cache when true.
+	 * @return array<int,array<string,mixed>>|WP_Error
+	 */
+	private function fetch_fallback_feed_posts( $force_refresh = false ) {
+		$settings = get_option( self::OPTION_KEY, array() );
+		$enabled  = isset( $settings['enable_feed_ingest'] ) && '1' === (string) $settings['enable_feed_ingest'];
+
+		if ( ! $enabled ) {
+			return array();
+		}
+
+		$raw_urls = isset( $settings['fallback_feed_urls'] ) ? (string) $settings['fallback_feed_urls'] : '';
+		$urls     = $this->extract_feed_urls( $raw_urls );
+		if ( empty( $urls ) ) {
+			return array();
+		}
+
+		$cache_ttl     = isset( $settings['cache_ttl'] ) ? max( 300, absint( $settings['cache_ttl'] ) ) : HOUR_IN_SECONDS;
+		$sync_limit    = isset( $settings['sync_limit'] ) ? max( 1, min( 50, absint( $settings['sync_limit'] ) ) ) : 25;
+		$transient_key = 'sca_feed_' . md5( wp_json_encode( $urls ) );
+
+		if ( $force_refresh ) {
+			delete_transient( $transient_key );
+		}
+
+		$cached = get_transient( $transient_key );
+		if ( false !== $cached && is_array( $cached ) ) {
+			return $cached;
+		}
+
+		require_once ABSPATH . WPINC . '/feed.php';
+
+		$normalized = array();
+		foreach ( $urls as $url ) {
+			$feed = fetch_feed( $url );
+			if ( is_wp_error( $feed ) ) {
+				continue;
+			}
+
+			$items = $feed->get_items( 0, $sync_limit );
+			foreach ( $items as $item ) {
+				$link        = (string) $item->get_permalink();
+				$caption     = trim( $item->get_title() . ' ' . wp_strip_all_tags( (string) $item->get_description() ) );
+				$timestamp   = gmdate( 'c', (int) $item->get_date( 'U' ) );
+				$enclosure   = $item->get_enclosure();
+				$media_url   = $enclosure ? (string) $enclosure->get_link() : '';
+				$platform    = $this->detect_platform_from_link( $link );
+				$external_id = md5( 'feed|' . $link );
+
+				$normalized[] = array(
+					'external_id'      => $external_id,
+					'caption'          => $caption,
+					'media_url'        => $media_url,
+					'media_type'       => 'UNKNOWN',
+					'permalink'        => $link,
+					'timestamp'        => $timestamp,
+					'like_count'       => 0,
+					'comments_count'   => 0,
+					'engagement_score' => 0,
+					'platform'         => $platform,
+					'ingest_source'    => 'feed',
+				);
+			}
+		}
+
+		set_transient( $transient_key, $normalized, $cache_ttl );
+		return $normalized;
+	}
+
+	/**
+	 * Extracts valid feed URLs from multiline input.
+	 *
+	 * @param string $raw_urls Raw textarea content.
+	 * @return array<int,string>
+	 */
+	private function extract_feed_urls( $raw_urls ) {
+		$urls = preg_split( '/\r\n|\r|\n/', $raw_urls );
+		if ( empty( $urls ) ) {
+			return array();
+		}
+
+		$clean_urls = array();
+		foreach ( $urls as $url ) {
+			$clean_url = esc_url_raw( trim( $url ) );
+			if ( ! empty( $clean_url ) ) {
+				$clean_urls[] = $clean_url;
+			}
+		}
+
+		return array_values( array_unique( $clean_urls ) );
+	}
+
+	/**
+	 * Dedupe posts by external ID or permalink.
+	 *
+	 * @param array<int,array<string,mixed>> $posts Raw posts.
+	 * @return array<int,array<string,mixed>>
+	 */
+	private function deduplicate_posts( $posts ) {
+		$deduped = array();
+		$seen    = array();
+
+		foreach ( $posts as $post ) {
+			$key = ! empty( $post['external_id'] ) ? (string) $post['external_id'] : (string) $post['permalink'];
+			if ( isset( $seen[ $key ] ) ) {
+				continue;
+			}
+
+			$seen[ $key ] = true;
+			$deduped[]    = $post;
+		}
+
+		return $deduped;
+	}
+
+	/**
+	 * Detects platform name from URL.
+	 *
+	 * @param string $link URL.
+	 * @return string
+	 */
+	private function detect_platform_from_link( $link ) {
+		$host = (string) wp_parse_url( $link, PHP_URL_HOST );
+		if ( false !== strpos( $host, 'instagram.' ) ) {
+			return 'instagram';
+		}
+
+		if ( false !== strpos( $host, 'facebook.' ) ) {
+			return 'facebook';
+		}
+
+		if ( false !== strpos( $host, 'pinterest.' ) ) {
+			return 'pinterest';
+		}
+
+		return 'external';
+	}
+
+	/**
 	 * Fetches Instagram business media.
 	 *
 	 * @return array<int,array<string,mixed>>|WP_Error
@@ -107,8 +257,13 @@ class SCA_API_Service {
 		);
 
 		$response = wp_remote_get( esc_url_raw( $url ), array( 'timeout' => 15 ) );
+		$posts    = $this->normalize_meta_response( $response, 'instagram' );
 
-		return $this->normalize_meta_response( $response, 'instagram' );
+		if ( is_wp_error( $posts ) ) {
+			return $posts;
+		}
+
+		return $this->set_ingest_source( $posts, 'api' );
 	}
 
 	/**
@@ -161,6 +316,7 @@ class SCA_API_Service {
 				'comments_count'   => $comment_count,
 				'engagement_score' => $this->calculate_engagement_score( $like_count, $comment_count ),
 				'platform'         => 'facebook',
+				'ingest_source'    => 'api',
 			);
 		}
 
@@ -232,6 +388,7 @@ class SCA_API_Service {
 				'comments_count'   => $comment_count,
 				'engagement_score' => $this->calculate_engagement_score( $like_count, $comment_count ),
 				'platform'         => 'pinterest',
+				'ingest_source'    => 'api',
 			);
 		}
 
@@ -277,6 +434,21 @@ class SCA_API_Service {
 		}
 
 		return $normalized;
+	}
+
+	/**
+	 * Sets ingest source for a list of posts.
+	 *
+	 * @param array<int,array<string,mixed>> $posts Posts.
+	 * @param string                         $source Source label.
+	 * @return array<int,array<string,mixed>>
+	 */
+	private function set_ingest_source( $posts, $source ) {
+		foreach ( $posts as $index => $post ) {
+			$posts[ $index ]['ingest_source'] = $source;
+		}
+
+		return $posts;
 	}
 
 	/**

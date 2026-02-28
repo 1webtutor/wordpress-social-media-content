@@ -34,6 +34,7 @@ class SCA_Shortcode {
 				'sort'     => 'engagement',
 				'limit'    => 6,
 				'hashtag'  => '',
+				'source'   => '',
 			),
 			$atts,
 			'social_posts'
@@ -44,6 +45,7 @@ class SCA_Shortcode {
 		$sort_raw = sanitize_key( $atts['sort'] );
 		$sort     = 'recent' === $sort_raw ? 'recent' : 'engagement';
 		$hashtag  = ltrim( sanitize_text_field( $atts['hashtag'] ), '#' );
+		$source   = sanitize_key( $atts['source'] );
 
 		$meta_query = array();
 		if ( ! empty( $platform ) ) {
@@ -58,6 +60,13 @@ class SCA_Shortcode {
 				'key'     => '_sca_hashtags',
 				'value'   => $hashtag,
 				'compare' => 'LIKE',
+			);
+		}
+
+		if ( in_array( $source, array( 'api', 'feed' ), true ) ) {
+			$meta_query[] = array(
+				'key'   => '_sca_ingest_source',
+				'value' => $source,
 			);
 		}
 

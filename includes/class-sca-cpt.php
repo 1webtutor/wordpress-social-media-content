@@ -92,6 +92,7 @@ class SCA_CPT {
 		update_post_meta( $post_id, '_sca_like_count', (int) $data['like_count'] );
 		update_post_meta( $post_id, '_sca_comments_count', (int) $data['comments_count'] );
 		update_post_meta( $post_id, '_sca_timestamp', sanitize_text_field( $data['timestamp'] ) );
+		update_post_meta( $post_id, '_sca_ingest_source', isset( $data['ingest_source'] ) ? sanitize_key( $data['ingest_source'] ) : 'api' );
 
 		if ( ! empty( $data['media_url'] ) ) {
 			self::maybe_attach_media( $post_id, $data['media_url'] );

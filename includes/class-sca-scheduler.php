@@ -51,6 +51,27 @@ class Social_Aggregator_Scheduler {
 	}
 
 	/**
+	 * Ensure recurring sync event for scheduled mode.
+	 *
+	 * @param array<string,mixed> $settings Settings.
+	 * @return void
+	 */
+	public function ensure_recurring_sync( $settings ) {
+		if ( ! isset( $settings['publish_mode'] ) || 'schedule' !== sanitize_key( $settings['publish_mode'] ) ) {
+			return;
+		}
+
+		$frequency = isset( $settings['schedule_frequency'] ) ? sanitize_key( $settings['schedule_frequency'] ) : 'once';
+		if ( ! in_array( $frequency, array( 'daily', 'weekly' ), true ) ) {
+			return;
+		}
+
+		if ( ! wp_next_scheduled( 'sca_scheduled_publish_event' ) ) {
+			wp_schedule_event( time(), $frequency, 'sca_scheduled_publish_event' );
+		}
+	}
+
+	/**
 	 * Get next schedule timestamp in site timezone.
 	 *
 	 * @param array<string,mixed> $settings Settings.
@@ -65,9 +86,10 @@ class Social_Aggregator_Scheduler {
 		if ( ! preg_match( '/^(?:[01]\d|2[0-3]):[0-5]\d$/', $time ) ) {
 			$time = '09:00';
 		}
-		list( $hours, $minutes ) = array_map( 'intval', explode( ':', $time ) );
 
-		$target = mktime( $hours, $minutes, 0, (int) gmdate( 'n', $now ), (int) gmdate( 'j', $now ), (int) gmdate( 'Y', $now ) );
+		list( $hours, $minutes ) = array_map( 'intval', explode( ':', $time ) );
+		$target                  = mktime( $hours, $minutes, 0, (int) gmdate( 'n', $now ), (int) gmdate( 'j', $now ), (int) gmdate( 'Y', $now ) );
+
 		if ( $target <= $now ) {
 			$target += DAY_IN_SECONDS;
 		}

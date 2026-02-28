@@ -19,6 +19,7 @@ define( 'SCA_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 
 require_once SCA_PLUGIN_DIR . 'includes/class-sca-content-processor.php';
 require_once SCA_PLUGIN_DIR . 'includes/class-sca-hashtag-engine.php';
+require_once SCA_PLUGIN_DIR . 'includes/class-sca-keyword-scheduler.php';
 require_once SCA_PLUGIN_DIR . 'includes/class-sca-scheduler.php';
 require_once SCA_PLUGIN_DIR . 'includes/class-sca-cpt.php';
 require_once SCA_PLUGIN_DIR . 'includes/class-sca-api-service.php';

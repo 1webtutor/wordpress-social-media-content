@@ -523,6 +523,130 @@ class Social_Aggregator_API {
 		return true;
 	}
 
+
+	/**
+	 * Fetch keyword-specific posts using API only.
+	 *
+	 * @param string            $keyword Keyword.
+	 * @param array<int,string> $platforms Platforms.
+	 * @param int               $max_posts Max posts.
+	 * @param int               $min_engagement Minimum engagement threshold.
+	 * @return array<int,array<string,mixed>>
+	 */
+	public function fetch_keyword_posts( $keyword, $platforms, $max_posts = 10, $min_engagement = 0 ) {
+		$keyword    = sanitize_text_field( $keyword );
+		$platforms  = array_values( array_unique( array_map( 'sanitize_key', (array) $platforms ) ) );
+		$max_posts  = max( 1, min( 50, absint( $max_posts ) ) );
+		$cache_key  = 'sca_kw_' . md5( wp_json_encode( array( $keyword, $platforms, $max_posts, $min_engagement ) ) );
+		$cached     = get_transient( $cache_key );
+
+		if ( false !== $cached && is_array( $cached ) ) {
+			return $cached;
+		}
+
+		$settings = get_option( self::OPTION_KEY, array() );
+		$items    = array();
+
+		foreach ( $platforms as $platform ) {
+			if ( ! $this->should_use_api_for_platform( $platform, $settings ) ) {
+				continue;
+			}
+
+			$posts = $this->fetch_platform_via_api( $platform );
+			if ( is_wp_error( $posts ) || ! is_array( $posts ) ) {
+				continue;
+			}
+
+			foreach ( $posts as $post ) {
+				$caption = isset( $post['caption'] ) ? (string) $post['caption'] : '';
+				if ( ! $this->keyword_match_in_content( $caption, $keyword ) ) {
+					continue;
+				}
+				if ( (int) $post['engagement_score'] < $min_engagement ) {
+					continue;
+				}
+				$post['relevance_score'] = $this->calculate_relevance_score( $caption, $keyword );
+				if ( (int) $post['relevance_score'] < 50 ) {
+					continue;
+				}
+				$post['final_score'] = ( (float) $post['relevance_score'] * 0.6 ) + ( (float) $post['engagement_score'] * 0.4 );
+				$items[] = $post;
+			}
+		}
+
+		usort(
+			$items,
+			static function ( $a, $b ) {
+				$left  = isset( $a['final_score'] ) ? (float) $a['final_score'] : 0;
+				$right = isset( $b['final_score'] ) ? (float) $b['final_score'] : 0;
+				if ( $left === $right ) {
+					return 0;
+				}
+				return ( $left > $right ) ? -1 : 1;
+			}
+		);
+
+		$items = array_slice( $items, 0, $max_posts );
+		set_transient( $cache_key, $items, 15 * MINUTE_IN_SECONDS );
+
+		return $items;
+	}
+
+	/**
+	 * Calculate relevance score for keyword matching.
+	 *
+	 * @param string $content Content.
+	 * @param string $keyword Keyword.
+	 * @return int
+	 */
+	public function calculate_relevance_score( $content, $keyword ) {
+		$text          = strtolower( preg_replace( '/[^a-z0-9#\s]/i', ' ', (string) $content ) );
+		$keyword_text  = strtolower( preg_replace( '/[^a-z0-9\s]/i', ' ', (string) $keyword ) );
+		$keyword_words = array_filter( preg_split( '/\s+/', $keyword_text ) );
+		$score         = 0;
+
+		if ( false !== strpos( $text, trim( $keyword_text ) ) ) {
+			$score += 50;
+		}
+
+		foreach ( $keyword_words as $word ) {
+			if ( false !== strpos( $text, $word ) ) {
+				$score += 20;
+			}
+			if ( false !== strpos( $text, '#' . $word ) ) {
+				$score += 10;
+			}
+			if ( preg_match( '/' . preg_quote( $word, '/' ) . '[a-z0-9]*/', $text ) ) {
+				$score += 5;
+			}
+		}
+
+		return max( 0, (int) $score );
+	}
+
+	/**
+	 * Quick keyword in-content matcher.
+	 *
+	 * @param string $content Content.
+	 * @param string $keyword Keyword.
+	 * @return bool
+	 */
+	private function keyword_match_in_content( $content, $keyword ) {
+		$content = strtolower( (string) $content );
+		$keyword = strtolower( (string) $keyword );
+		if ( false !== strpos( $content, $keyword ) ) {
+			return true;
+		}
+
+		foreach ( array_filter( preg_split( '/\s+/', $keyword ) ) as $part ) {
+			if ( false !== strpos( $content, $part ) ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
 	/**
 	 * Log plugin message.
 	 */

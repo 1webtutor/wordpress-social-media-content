@@ -277,3 +277,87 @@ includes/
 - For production use, prefer official APIs over scraping.
 - Ensure all external integrations comply with provider terms and legal requirements.
 - Keep access tokens secure and rotate periodically.
+
+---
+
+## 13) Keyword-Based Smart Scheduler (API Only)
+
+A new **Keyword Scheduler** screen is available at:
+
+- **Social Aggregator → Keyword Scheduler**
+
+You can create keyword jobs with:
+
+- keyword text (e.g., `actor vijay`, `anime naruto`)
+- selected platforms (Instagram/Facebook/Pinterest)
+- target post type
+- publish mode (draft/publish/schedule)
+- schedule time (HH:MM)
+- minimum engagement score
+- max posts per fetch
+- frequency (daily/weekly)
+
+### Keyword scheduler DB schema
+
+- `{$wpdb->prefix}social_keyword_schedulers`
+  - `id`
+  - `keyword`
+  - `platforms`
+  - `post_type`
+  - `publish_mode`
+  - `schedule_time`
+  - `min_engagement`
+  - `max_posts`
+  - `frequency`
+  - `is_active`
+  - `created_at`
+
+### Keyword scheduler logs schema
+
+- `{$wpdb->prefix}social_keyword_logs`
+  - `id`
+  - `keyword`
+  - `fetched_count`
+  - `published_count`
+  - `skipped_count`
+  - `last_run`
+  - `notes`
+
+### Relevance + Ranking
+
+For each fetched API item:
+
+- `relevance_score = calculate_relevance_score(content, keyword)`
+- `engagement_score = like_count + comments_count`
+- `final_score = (relevance_score * 0.6) + (engagement_score * 0.4)`
+
+Items under relevance threshold (`< 50`) are dropped.
+
+### Keyword scheduler cron
+
+- Event: `sca_keyword_scheduler_event` (hourly)
+- Executes all active keyword configs
+- Applies frequency gate (daily/weekly)
+- Inserts posts with configured mode and schedule time
+
+### Duplicate prevention
+
+Before insert, checks are performed using:
+
+- original permalink (`_sca_original_url`)
+- content hash (`_sca_content_hash`)
+- media source URL (`_sca_source_media_url`)
+
+### Accuracy verification
+
+- Built-in relevance scoring is always used.
+- Optional AI verification hook is provided:
+  - `sca_keyword_ai_verify` filter
+  - return `true/false` to allow/deny publishing.
+
+### Important
+
+Keyword Scheduler pipeline is **API-only**:
+
+- uses official API-backed fetch methods
+- does not use scraping paths for keyword jobs

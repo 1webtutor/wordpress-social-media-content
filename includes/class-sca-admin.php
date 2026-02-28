@@ -186,18 +186,18 @@ class Social_Aggregator_Admin {
 	 */
 	public function handle_manual_sync() {
 		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_die( esc_html__( 'Not allowed.', 'social-content-aggregator' ) );
+			wp_die( esc_html__( 'You do not have permission to do this.', 'social-content-aggregator' ) );
 		}
 
-		check_admin_referer( 'sca_manual_sync', 'sca_manual_sync_nonce' );
+		$nonce = isset( $_POST['sca_manual_sync_nonce'] ) ? sanitize_text_field( wp_unslash( $_POST['sca_manual_sync_nonce'] ) ) : '';
+		if ( ! wp_verify_nonce( $nonce, 'sca_manual_sync_action' ) ) {
+			wp_die( esc_html__( 'Invalid request.', 'social-content-aggregator' ) );
+		}
 
-		$this->api->sync_all_platform_posts( true );
+		$api_service = new SCA_API_Service();
+		$api_service->sync_all_platform_posts( true );
 
-		wp_safe_redirect( add_query_arg( 'sca_synced', '1', wp_get_referer() ) );
+		wp_safe_redirect( add_query_arg( array( 'page' => 'sca-settings', 'sca_sync' => '1' ), admin_url( 'options-general.php' ) ) );
 		exit;
 	}
-}
-
-if ( ! class_exists( 'SCA_Admin' ) ) {
-	class_alias( 'Social_Aggregator_Admin', 'SCA_Admin' );
 }

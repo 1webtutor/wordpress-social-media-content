@@ -1,6 +1,6 @@
 <?php
 /**
- * API and scraping service.
+ * API integrations for social providers.
  *
  * @package SocialContentAggregator
  */
@@ -10,100 +10,58 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /**
- * Fetches and stores social posts.
+ * Fetches and normalizes social content from official APIs.
  */
-class Social_Aggregator_API {
+class SCA_API_Service {
 
 	/**
-	 * Option key.
+	 * Settings option key.
 	 *
 	 * @var string
 	 */
 	const OPTION_KEY = 'sca_settings';
 
-	/** @var SCA_CPT */
-	private $cpt;
-
-	/** @var Social_Aggregator_Scheduler */
-	private $scheduler;
-
-	/** @var Social_Aggregator_Content_Processor */
-	private $processor;
-
-	/** @var Social_Aggregator_Hashtag_Engine */
-	private $hashtag_engine;
-
 	/**
-	 * Constructor.
-	 */
-	public function __construct( $cpt, $scheduler, $processor, $hashtag_engine ) {
-		$this->cpt            = $cpt;
-		$this->scheduler      = $scheduler;
-		$this->processor      = $processor;
-		$this->hashtag_engine = $hashtag_engine;
-	}
-
-	/**
-	 * Sync content from all configured sources.
+	 * Syncs all configured platforms.
 	 *
-	 * API is automatically preferred when IDs/tokens exist; scraping is default fallback.
-	 *
-	 * @param bool $force_refresh Force cache clear.
+	 * @param bool $force_refresh Skip transient cache when true.
 	 * @return void
 	 */
 	public function sync_all_platform_posts( $force_refresh = false ) {
-		if ( ! $this->allow_rate_limited_sync() ) {
-			$this->log_message( 'Sync skipped due to rate limit.' );
-			return;
-		}
+		$merged_posts = array();
+		$platforms    = array( 'instagram', 'facebook', 'pinterest' );
 
-		$settings = get_option( self::OPTION_KEY, array() );
-		$merged   = array();
-
-		foreach ( array( 'instagram', 'facebook', 'pinterest' ) as $platform ) {
+		foreach ( $platforms as $platform ) {
 			$posts = $this->fetch_platform_posts( $platform, $force_refresh );
-			if ( ! is_wp_error( $posts ) ) {
-				$merged = array_merge( $merged, $posts );
-			}
-		}
-
-		$feed_posts = $this->fetch_fallback_feed_posts( $force_refresh );
-		if ( ! is_wp_error( $feed_posts ) ) {
-			$merged = array_merge( $merged, $feed_posts );
-		}
-
-		$merged = $this->deduplicate_posts( $merged );
-		$merged = $this->filter_by_engagement( $merged, isset( $settings['min_engagement'] ) ? absint( $settings['min_engagement'] ) : 0 );
-
-		foreach ( array_values( $merged ) as $index => $item ) {
-			$item['caption'] = $this->processor->clean_caption( $item['caption'] );
-			$hashtags        = $this->hashtag_engine->extract_hashtags( $item['caption'] );
-			$this->hashtag_engine->update_trending_stats( $hashtags, (int) $item['engagement_score'] );
-			$top_hashtags = $this->hashtag_engine->get_top_hashtags( 5 );
-
-			if ( ! empty( $top_hashtags ) ) {
-				$item['caption'] = $item['caption'] . ' #' . implode( ' #', $top_hashtags );
+			if ( is_wp_error( $posts ) || empty( $posts ) ) {
+				continue;
 			}
 
-			$item['caption']  = $this->processor->enforce_link_removal( $item['caption'] );
-			$item['hashtags'] = $hashtags;
+			$merged_posts = array_merge( $merged_posts, $posts );
+		}
 
-			$post_args = $this->scheduler->build_post_args( $item, $settings, $index );
-			$this->cpt->upsert_social_post( $item, $post_args );
+		$fallback_posts = $this->fetch_fallback_feed_posts( $force_refresh );
+		if ( ! is_wp_error( $fallback_posts ) && ! empty( $fallback_posts ) ) {
+			$merged_posts = array_merge( $merged_posts, $fallback_posts );
+		}
+
+		$merged_posts = $this->deduplicate_posts( $merged_posts );
+		foreach ( $merged_posts as $post ) {
+			SCA_CPT::upsert_social_post( $post );
 		}
 	}
 
 	/**
-	 * Fetch posts for a platform.
+	 * Returns platform posts using cached transient.
 	 *
-	 * @param string $platform Platform.
-	 * @param bool   $force_refresh Force cache refresh.
+	 * @param string $platform Platform key.
+	 * @param bool   $force_refresh Skip transient cache when true.
 	 * @return array<int,array<string,mixed>>|WP_Error
 	 */
 	public function fetch_platform_posts( $platform, $force_refresh = false ) {
 		$settings      = get_option( self::OPTION_KEY, array() );
 		$cache_ttl     = isset( $settings['cache_ttl'] ) ? max( 300, absint( $settings['cache_ttl'] ) ) : HOUR_IN_SECONDS;
-		$transient_key = 'sca_platform_' . sanitize_key( $platform );
+		$transient_key = 'sca_api_' . sanitize_key( $platform );
 
 		if ( $force_refresh ) {
 			delete_transient( $transient_key );
@@ -114,11 +72,18 @@ class Social_Aggregator_API {
 			return $cached;
 		}
 
-		$posts = array();
-		if ( $this->should_use_api_for_platform( $platform, $settings ) ) {
-			$posts = $this->fetch_platform_via_api( $platform );
-		} else {
-			$posts = $this->fetch_scraped_posts_for_platform( $platform, $settings, $force_refresh );
+		switch ( $platform ) {
+			case 'instagram':
+				$posts = $this->fetch_instagram_posts();
+				break;
+			case 'facebook':
+				$posts = $this->fetch_facebook_posts();
+				break;
+			case 'pinterest':
+				$posts = $this->fetch_pinterest_posts();
+				break;
+			default:
+				return new WP_Error( 'sca_invalid_platform', __( 'Unsupported platform requested.', 'social-content-aggregator' ) );
 		}
 
 		if ( ! is_wp_error( $posts ) ) {
@@ -129,252 +94,258 @@ class Social_Aggregator_API {
 	}
 
 	/**
-	 * Determine whether API should be preferred.
+	 * Fetches non-API feed posts (RSS/Atom) if enabled.
 	 *
-	 * @param string               $platform Platform.
-	 * @param array<string,mixed> $settings Settings.
-	 * @return bool
-	 */
-	private function should_use_api_for_platform( $platform, $settings ) {
-		switch ( $platform ) {
-			case 'instagram':
-				return ! empty( $settings['instagram_account_id'] ) && ! empty( $settings['meta_access_token'] );
-			case 'facebook':
-				return ! empty( $settings['facebook_page_id'] ) && ! empty( $settings['meta_access_token'] );
-			case 'pinterest':
-				return ! empty( $settings['pinterest_board_id'] ) && ! empty( $settings['pinterest_access_token'] );
-			default:
-				return false;
-		}
-	}
-
-	/**
-	 * Fetch one platform via API.
-	 *
-	 * @param string $platform Platform.
+	 * @param bool $force_refresh Skip transient cache when true.
 	 * @return array<int,array<string,mixed>>|WP_Error
-	 */
-	private function fetch_platform_via_api( $platform ) {
-		switch ( $platform ) {
-			case 'instagram':
-				return $this->fetch_instagram_posts();
-			case 'facebook':
-				return $this->fetch_facebook_posts();
-			case 'pinterest':
-				return $this->fetch_pinterest_posts();
-			default:
-				return array();
-		}
-	}
-
-	/**
-	 * Fetch feed fallback posts.
 	 */
 	private function fetch_fallback_feed_posts( $force_refresh = false ) {
 		$settings = get_option( self::OPTION_KEY, array() );
-		if ( empty( $settings['enable_feed_ingest'] ) || '1' !== (string) $settings['enable_feed_ingest'] ) {
+		$enabled  = isset( $settings['enable_feed_ingest'] ) && '1' === (string) $settings['enable_feed_ingest'];
+
+		if ( ! $enabled ) {
 			return array();
 		}
 
-		require_once ABSPATH . WPINC . '/feed.php';
-		$urls = $this->extract_urls( isset( $settings['fallback_feed_urls'] ) ? $settings['fallback_feed_urls'] : '' );
+		$raw_urls = isset( $settings['fallback_feed_urls'] ) ? (string) $settings['fallback_feed_urls'] : '';
+		$urls     = $this->extract_feed_urls( $raw_urls );
 		if ( empty( $urls ) ) {
 			return array();
 		}
 
-		$key = 'sca_feed_' . md5( wp_json_encode( $urls ) );
+		$cache_ttl     = isset( $settings['cache_ttl'] ) ? max( 300, absint( $settings['cache_ttl'] ) ) : HOUR_IN_SECONDS;
+		$sync_limit    = isset( $settings['sync_limit'] ) ? max( 1, min( 50, absint( $settings['sync_limit'] ) ) ) : 25;
+		$transient_key = 'sca_feed_' . md5( wp_json_encode( $urls ) );
+
 		if ( $force_refresh ) {
-			delete_transient( $key );
+			delete_transient( $transient_key );
 		}
 
-		$cached = get_transient( $key );
+		$cached = get_transient( $transient_key );
 		if ( false !== $cached && is_array( $cached ) ) {
 			return $cached;
 		}
 
-		$limit = isset( $settings['sync_limit'] ) ? max( 1, min( 50, absint( $settings['sync_limit'] ) ) ) : 25;
-		$data  = array();
+		require_once ABSPATH . WPINC . '/feed.php';
 
+		$normalized = array();
 		foreach ( $urls as $url ) {
 			$feed = fetch_feed( $url );
 			if ( is_wp_error( $feed ) ) {
 				continue;
 			}
 
-			foreach ( $feed->get_items( 0, $limit ) as $item ) {
-				$link = (string) $item->get_permalink();
-				$data[] = array(
-					'external_id'      => md5( 'feed|' . $link ),
-					'caption'          => trim( (string) $item->get_title() . ' ' . wp_strip_all_tags( (string) $item->get_description() ) ),
-					'media_url'        => '',
+			$items = $feed->get_items( 0, $sync_limit );
+			foreach ( $items as $item ) {
+				$link        = (string) $item->get_permalink();
+				$caption     = trim( $item->get_title() . ' ' . wp_strip_all_tags( (string) $item->get_description() ) );
+				$timestamp   = gmdate( 'c', (int) $item->get_date( 'U' ) );
+				$enclosure   = $item->get_enclosure();
+				$media_url   = $enclosure ? (string) $enclosure->get_link() : '';
+				$platform    = $this->detect_platform_from_link( $link );
+				$external_id = md5( 'feed|' . $link );
+
+				$normalized[] = array(
+					'external_id'      => $external_id,
+					'caption'          => $caption,
+					'media_url'        => $media_url,
+					'media_type'       => 'UNKNOWN',
 					'permalink'        => $link,
-					'timestamp'        => gmdate( 'c', (int) $item->get_date( 'U' ) ),
+					'timestamp'        => $timestamp,
 					'like_count'       => 0,
 					'comments_count'   => 0,
 					'engagement_score' => 0,
-					'platform'         => $this->detect_platform( $link ),
+					'platform'         => $platform,
 					'ingest_source'    => 'feed',
 				);
 			}
 		}
 
-		set_transient( $key, $data, HOUR_IN_SECONDS );
-		return $data;
+		set_transient( $transient_key, $normalized, $cache_ttl );
+		return $normalized;
 	}
 
 	/**
-	 * Scrape posts filtered by platform.
+	 * Extracts valid feed URLs from multiline input.
 	 *
-	 * @param string               $platform Platform.
-	 * @param array<string,mixed> $settings Settings.
-	 * @param bool                 $force_refresh Force refresh.
-	 * @return array<int,array<string,mixed>>|WP_Error
+	 * @param string $raw_urls Raw textarea content.
+	 * @return array<int,string>
 	 */
-	private function fetch_scraped_posts_for_platform( $platform, $settings, $force_refresh = false ) {
-		$enabled = ! isset( $settings['enable_scraping'] ) || '1' === (string) $settings['enable_scraping'];
-		if ( ! $enabled ) {
-			return array();
-		}
-
-		$urls = $this->extract_urls( isset( $settings['scrape_urls'] ) ? $settings['scrape_urls'] : '' );
+	private function extract_feed_urls( $raw_urls ) {
+		$urls = preg_split( '/\r\n|\r|\n/', $raw_urls );
 		if ( empty( $urls ) ) {
 			return array();
 		}
 
-		$platform_urls = array_filter(
-			$urls,
-			function ( $url ) use ( $platform ) {
-				return $platform === $this->detect_platform( $url );
+		$clean_urls = array();
+		foreach ( $urls as $url ) {
+			$clean_url = esc_url_raw( trim( $url ) );
+			if ( ! empty( $clean_url ) ) {
+				$clean_urls[] = $clean_url;
 			}
-		);
-
-		if ( empty( $platform_urls ) ) {
-			return array();
 		}
 
-		$key = 'sca_scrape_' . sanitize_key( $platform ) . '_' . md5( wp_json_encode( $platform_urls ) );
-		if ( $force_refresh ) {
-			delete_transient( $key );
-		}
-
-		$cached = get_transient( $key );
-		if ( false !== $cached && is_array( $cached ) ) {
-			return $cached;
-		}
-
-		$items = array();
-		foreach ( $platform_urls as $url ) {
-			$response = wp_remote_get( esc_url_raw( $url ), array( 'timeout' => 15 ) );
-			if ( is_wp_error( $response ) || 200 !== (int) wp_remote_retrieve_response_code( $response ) ) {
-				continue;
-			}
-
-			$html = (string) wp_remote_retrieve_body( $response );
-			preg_match( '/<title>(.*?)<\/title>/is', $html, $title );
-			preg_match( '/property="og:image"\s+content="([^"]+)"/is', $html, $image );
-
-			$caption = isset( $title[1] ) ? wp_strip_all_tags( html_entity_decode( $title[1], ENT_QUOTES, 'UTF-8' ) ) : '';
-			$items[] = array(
-				'external_id'      => md5( 'scrape|' . $platform . '|' . $url ),
-				'caption'          => $caption,
-				'media_url'        => isset( $image[1] ) ? esc_url_raw( $image[1] ) : '',
-				'permalink'        => esc_url_raw( $url ),
-				'timestamp'        => gmdate( 'c' ),
-				'like_count'       => 0,
-				'comments_count'   => 0,
-				'engagement_score' => 0,
-				'platform'         => $platform,
-				'ingest_source'    => 'scrape',
-			);
-		}
-
-		set_transient( $key, $items, HOUR_IN_SECONDS );
-		return $items;
+		return array_values( array_unique( $clean_urls ) );
 	}
 
 	/**
-	 * Fetch Instagram API posts.
+	 * Dedupe posts by external ID or permalink.
+	 *
+	 * @param array<int,array<string,mixed>> $posts Raw posts.
+	 * @return array<int,array<string,mixed>>
+	 */
+	private function deduplicate_posts( $posts ) {
+		$deduped = array();
+		$seen    = array();
+
+		foreach ( $posts as $post ) {
+			$key = ! empty( $post['external_id'] ) ? (string) $post['external_id'] : (string) $post['permalink'];
+			if ( isset( $seen[ $key ] ) ) {
+				continue;
+			}
+
+			$seen[ $key ] = true;
+			$deduped[]    = $post;
+		}
+
+		return $deduped;
+	}
+
+	/**
+	 * Detects platform name from URL.
+	 *
+	 * @param string $link URL.
+	 * @return string
+	 */
+	private function detect_platform_from_link( $link ) {
+		$host = (string) wp_parse_url( $link, PHP_URL_HOST );
+		if ( false !== strpos( $host, 'instagram.' ) ) {
+			return 'instagram';
+		}
+
+		if ( false !== strpos( $host, 'facebook.' ) ) {
+			return 'facebook';
+		}
+
+		if ( false !== strpos( $host, 'pinterest.' ) ) {
+			return 'pinterest';
+		}
+
+		return 'external';
+	}
+
+	/**
+	 * Fetches Instagram business media.
+	 *
+	 * @return array<int,array<string,mixed>>|WP_Error
 	 */
 	private function fetch_instagram_posts() {
 		$settings   = get_option( self::OPTION_KEY, array() );
 		$account_id = isset( $settings['instagram_account_id'] ) ? $settings['instagram_account_id'] : '';
 		$token      = isset( $settings['meta_access_token'] ) ? $settings['meta_access_token'] : '';
-		$limit      = isset( $settings['sync_limit'] ) ? max( 1, min( 50, absint( $settings['sync_limit'] ) ) ) : 25;
+		$sync_limit = isset( $settings['sync_limit'] ) ? max( 1, min( 50, absint( $settings['sync_limit'] ) ) ) : 25;
 
 		if ( empty( $account_id ) || empty( $token ) ) {
-			return new WP_Error( 'sca_missing_ig', __( 'Missing Instagram credentials.', 'social-content-aggregator' ) );
+			return new WP_Error( 'sca_missing_instagram_credentials', __( 'Instagram API credentials are not configured.', 'social-content-aggregator' ) );
 		}
 
-		$url      = sprintf( 'https://graph.facebook.com/v20.0/%1$s/media?fields=id,caption,media_url,media_type,permalink,timestamp,like_count,comments_count&limit=%2$d&access_token=%3$s', rawurlencode( $account_id ), $limit, rawurlencode( $token ) );
-		$response = wp_remote_get( esc_url_raw( $url ), array( 'timeout' => 15 ) );
+		$url = sprintf(
+			'https://graph.facebook.com/v20.0/%1$s/media?fields=id,caption,media_url,media_type,permalink,timestamp,like_count,comments_count&limit=%2$d&access_token=%3$s',
+			rawurlencode( $account_id ),
+			$sync_limit,
+			rawurlencode( $token )
+		);
 
-		return $this->normalize_meta_response( $response, 'instagram' );
+		$response = wp_remote_get( esc_url_raw( $url ), array( 'timeout' => 15 ) );
+		$posts    = $this->normalize_meta_response( $response, 'instagram' );
+
+		if ( is_wp_error( $posts ) ) {
+			return $posts;
+		}
+
+		return $this->set_ingest_source( $posts, 'api' );
 	}
 
 	/**
-	 * Fetch Facebook API posts.
+	 * Fetches Facebook page posts.
+	 *
+	 * @return array<int,array<string,mixed>>|WP_Error
 	 */
 	private function fetch_facebook_posts() {
-		$settings = get_option( self::OPTION_KEY, array() );
-		$page_id  = isset( $settings['facebook_page_id'] ) ? $settings['facebook_page_id'] : '';
-		$token    = isset( $settings['meta_access_token'] ) ? $settings['meta_access_token'] : '';
-		$limit    = isset( $settings['sync_limit'] ) ? max( 1, min( 50, absint( $settings['sync_limit'] ) ) ) : 25;
+		$settings   = get_option( self::OPTION_KEY, array() );
+		$page_id    = isset( $settings['facebook_page_id'] ) ? $settings['facebook_page_id'] : '';
+		$token      = isset( $settings['meta_access_token'] ) ? $settings['meta_access_token'] : '';
+		$sync_limit = isset( $settings['sync_limit'] ) ? max( 1, min( 50, absint( $settings['sync_limit'] ) ) ) : 25;
 
 		if ( empty( $page_id ) || empty( $token ) ) {
-			return new WP_Error( 'sca_missing_fb', __( 'Missing Facebook credentials.', 'social-content-aggregator' ) );
+			return new WP_Error( 'sca_missing_facebook_credentials', __( 'Facebook API credentials are not configured.', 'social-content-aggregator' ) );
 		}
 
-		$url      = sprintf( 'https://graph.facebook.com/v20.0/%1$s/posts?fields=id,message,permalink_url,created_time,full_picture,likes.summary(true),comments.summary(true)&limit=%2$d&access_token=%3$s', rawurlencode( $page_id ), $limit, rawurlencode( $token ) );
+		$url = sprintf(
+			'https://graph.facebook.com/v20.0/%1$s/posts?fields=id,message,permalink_url,created_time,full_picture,likes.summary(true),comments.summary(true)&limit=%2$d&access_token=%3$s',
+			rawurlencode( $page_id ),
+			$sync_limit,
+			rawurlencode( $token )
+		);
+
 		$response = wp_remote_get( esc_url_raw( $url ), array( 'timeout' => 15 ) );
+
 		if ( is_wp_error( $response ) ) {
 			return $response;
 		}
 
+		$code = wp_remote_retrieve_response_code( $response );
 		$body = json_decode( wp_remote_retrieve_body( $response ), true );
-		if ( ! isset( $body['data'] ) || ! is_array( $body['data'] ) ) {
-			return new WP_Error( 'sca_fb_error', __( 'Facebook API request failed.', 'social-content-aggregator' ) );
+		if ( 200 !== (int) $code || ! isset( $body['data'] ) ) {
+			return new WP_Error( 'sca_facebook_api_error', __( 'Facebook API request failed.', 'social-content-aggregator' ) );
 		}
 
-		$out = array();
+		$normalized = array();
 		foreach ( $body['data'] as $item ) {
-			$likes = isset( $item['likes']['summary']['total_count'] ) ? (int) $item['likes']['summary']['total_count'] : 0;
-			$comm  = isset( $item['comments']['summary']['total_count'] ) ? (int) $item['comments']['summary']['total_count'] : 0;
-			$out[] = array(
+			$caption       = isset( $item['message'] ) ? (string) $item['message'] : '';
+			$like_count    = isset( $item['likes']['summary']['total_count'] ) ? (int) $item['likes']['summary']['total_count'] : 0;
+			$comment_count = isset( $item['comments']['summary']['total_count'] ) ? (int) $item['comments']['summary']['total_count'] : 0;
+			$normalized[]  = array(
 				'external_id'      => isset( $item['id'] ) ? $item['id'] : '',
-				'caption'          => isset( $item['message'] ) ? (string) $item['message'] : '',
+				'caption'          => $caption,
 				'media_url'        => isset( $item['full_picture'] ) ? $item['full_picture'] : '',
+				'media_type'       => 'IMAGE',
 				'permalink'        => isset( $item['permalink_url'] ) ? $item['permalink_url'] : '',
 				'timestamp'        => isset( $item['created_time'] ) ? $item['created_time'] : '',
-				'like_count'       => $likes,
-				'comments_count'   => $comm,
-				'engagement_score' => $likes + $comm,
+				'like_count'       => $like_count,
+				'comments_count'   => $comment_count,
+				'engagement_score' => $this->calculate_engagement_score( $like_count, $comment_count ),
 				'platform'         => 'facebook',
 				'ingest_source'    => 'api',
 			);
 		}
 
-		return $out;
+		return $normalized;
 	}
 
 	/**
-	 * Fetch Pinterest API posts.
+	 * Fetches Pinterest board pins via API v5.
+	 *
+	 * @return array<int,array<string,mixed>>|WP_Error
 	 */
 	private function fetch_pinterest_posts() {
-		$settings = get_option( self::OPTION_KEY, array() );
-		$board_id = isset( $settings['pinterest_board_id'] ) ? $settings['pinterest_board_id'] : '';
-		$token    = isset( $settings['pinterest_access_token'] ) ? $settings['pinterest_access_token'] : '';
-		$limit    = isset( $settings['sync_limit'] ) ? max( 1, min( 50, absint( $settings['sync_limit'] ) ) ) : 25;
+		$settings   = get_option( self::OPTION_KEY, array() );
+		$board_id   = isset( $settings['pinterest_board_id'] ) ? $settings['pinterest_board_id'] : '';
+		$token      = isset( $settings['pinterest_access_token'] ) ? $settings['pinterest_access_token'] : '';
+		$sync_limit = isset( $settings['sync_limit'] ) ? max( 1, min( 50, absint( $settings['sync_limit'] ) ) ) : 25;
 
 		if ( empty( $board_id ) || empty( $token ) ) {
-			return new WP_Error( 'sca_missing_pin', __( 'Missing Pinterest credentials.', 'social-content-aggregator' ) );
+			return new WP_Error( 'sca_missing_pinterest_credentials', __( 'Pinterest API credentials are not configured.', 'social-content-aggregator' ) );
 		}
 
-		$url      = sprintf( 'https://api.pinterest.com/v5/boards/%1$s/pins?page_size=%2$d', rawurlencode( $board_id ), $limit );
+		$url      = sprintf( 'https://api.pinterest.com/v5/boards/%s/pins?page_size=%d', rawurlencode( $board_id ), $sync_limit );
 		$response = wp_remote_get(
 			esc_url_raw( $url ),
 			array(
-				'headers' => array( 'Authorization' => 'Bearer ' . $token ),
 				'timeout' => 15,
+				'headers' => array(
+					'Authorization' => 'Bearer ' . $token,
+				),
 			)
 		);
 
@@ -382,155 +353,112 @@ class Social_Aggregator_API {
 			return $response;
 		}
 
+		$code = wp_remote_retrieve_response_code( $response );
 		$body = json_decode( wp_remote_retrieve_body( $response ), true );
-		if ( ! isset( $body['items'] ) || ! is_array( $body['items'] ) ) {
-			return new WP_Error( 'sca_pin_error', __( 'Pinterest API request failed.', 'social-content-aggregator' ) );
+		if ( 200 !== (int) $code || ! isset( $body['items'] ) ) {
+			return new WP_Error( 'sca_pinterest_api_error', __( 'Pinterest API request failed.', 'social-content-aggregator' ) );
 		}
 
-		$out = array();
+		$normalized = array();
 		foreach ( $body['items'] as $item ) {
-			$likes = isset( $item['pin_metrics']['save_count'] ) ? (int) $item['pin_metrics']['save_count'] : 0;
-			$comm  = isset( $item['pin_metrics']['comment_count'] ) ? (int) $item['pin_metrics']['comment_count'] : 0;
-			$out[] = array(
+			$description   = isset( $item['description'] ) ? (string) $item['description'] : '';
+			$title         = isset( $item['title'] ) ? (string) $item['title'] : '';
+			$caption       = trim( $title . ' ' . $description );
+			$media_url     = '';
+			$media_type    = 'IMAGE';
+			$like_count    = isset( $item['pin_metrics']['save_count'] ) ? (int) $item['pin_metrics']['save_count'] : 0;
+			$comment_count = isset( $item['pin_metrics']['comment_count'] ) ? (int) $item['pin_metrics']['comment_count'] : 0;
+
+			if ( isset( $item['media']['images']['originals']['url'] ) ) {
+				$media_url = $item['media']['images']['originals']['url'];
+			}
+
+			if ( isset( $item['media']['media_type'] ) ) {
+				$media_type = (string) $item['media']['media_type'];
+			}
+
+			$normalized[] = array(
 				'external_id'      => isset( $item['id'] ) ? $item['id'] : '',
-				'caption'          => trim( ( isset( $item['title'] ) ? $item['title'] : '' ) . ' ' . ( isset( $item['description'] ) ? $item['description'] : '' ) ),
-				'media_url'        => isset( $item['media']['images']['originals']['url'] ) ? $item['media']['images']['originals']['url'] : '',
+				'caption'          => $caption,
+				'media_url'        => $media_url,
+				'media_type'       => $media_type,
 				'permalink'        => isset( $item['link'] ) ? $item['link'] : '',
 				'timestamp'        => isset( $item['created_at'] ) ? $item['created_at'] : '',
-				'like_count'       => $likes,
-				'comments_count'   => $comm,
-				'engagement_score' => $likes + $comm,
+				'like_count'       => $like_count,
+				'comments_count'   => $comment_count,
+				'engagement_score' => $this->calculate_engagement_score( $like_count, $comment_count ),
 				'platform'         => 'pinterest',
 				'ingest_source'    => 'api',
 			);
 		}
 
-		return $out;
+		return $normalized;
 	}
 
 	/**
-	 * Normalize Meta Graph API response.
+	 * Normalizes Meta Graph response for Instagram media.
+	 *
+	 * @param array<string,mixed>|WP_Error $response HTTP response.
+	 * @param string                       $platform Platform key.
+	 * @return array<int,array<string,mixed>>|WP_Error
 	 */
 	private function normalize_meta_response( $response, $platform ) {
 		if ( is_wp_error( $response ) ) {
 			return $response;
 		}
 
+		$code = wp_remote_retrieve_response_code( $response );
 		$body = json_decode( wp_remote_retrieve_body( $response ), true );
-		if ( ! isset( $body['data'] ) || ! is_array( $body['data'] ) ) {
-			return new WP_Error( 'sca_meta_error', __( 'Meta API request failed.', 'social-content-aggregator' ) );
+		if ( 200 !== (int) $code || ! isset( $body['data'] ) ) {
+			return new WP_Error( 'sca_meta_api_error', __( 'Meta API request failed.', 'social-content-aggregator' ) );
 		}
 
-		$out = array();
+		$normalized = array();
 		foreach ( $body['data'] as $item ) {
-			$likes = isset( $item['like_count'] ) ? (int) $item['like_count'] : 0;
-			$comm  = isset( $item['comments_count'] ) ? (int) $item['comments_count'] : 0;
-			$out[] = array(
+			$caption       = isset( $item['caption'] ) ? (string) $item['caption'] : '';
+			$like_count    = isset( $item['like_count'] ) ? (int) $item['like_count'] : 0;
+			$comment_count = isset( $item['comments_count'] ) ? (int) $item['comments_count'] : 0;
+
+			$normalized[] = array(
 				'external_id'      => isset( $item['id'] ) ? $item['id'] : '',
-				'caption'          => isset( $item['caption'] ) ? (string) $item['caption'] : '',
+				'caption'          => $caption,
 				'media_url'        => isset( $item['media_url'] ) ? $item['media_url'] : '',
+				'media_type'       => isset( $item['media_type'] ) ? $item['media_type'] : '',
 				'permalink'        => isset( $item['permalink'] ) ? $item['permalink'] : '',
 				'timestamp'        => isset( $item['timestamp'] ) ? $item['timestamp'] : '',
-				'like_count'       => $likes,
-				'comments_count'   => $comm,
-				'engagement_score' => $likes + $comm,
+				'like_count'       => $like_count,
+				'comments_count'   => $comment_count,
+				'engagement_score' => $this->calculate_engagement_score( $like_count, $comment_count ),
 				'platform'         => $platform,
-				'ingest_source'    => 'api',
 			);
 		}
 
-		return $out;
+		return $normalized;
 	}
 
 	/**
-	 * Deduplicate by permalink or external id.
+	 * Sets ingest source for a list of posts.
+	 *
+	 * @param array<int,array<string,mixed>> $posts Posts.
+	 * @param string                         $source Source label.
+	 * @return array<int,array<string,mixed>>
 	 */
-	private function deduplicate_posts( $posts ) {
-		$unique = array();
-		$seen   = array();
-
-		foreach ( $posts as $post ) {
-			$key = ! empty( $post['permalink'] ) ? 'url:' . $post['permalink'] : 'id:' . $post['external_id'];
-			if ( isset( $seen[ $key ] ) ) {
-				continue;
-			}
-
-			$seen[ $key ] = true;
-			$unique[]     = $post;
+	private function set_ingest_source( $posts, $source ) {
+		foreach ( $posts as $index => $post ) {
+			$posts[ $index ]['ingest_source'] = $source;
 		}
 
-		return $unique;
+		return $posts;
 	}
 
 	/**
-	 * Filter by engagement threshold.
+	 * Computes engagement score.
+	 *
+	 * @param int $likes Like count.
+	 * @param int $comments Comment count.
+	 * @return int
 	 */
-	private function filter_by_engagement( $posts, $min_score ) {
-		return array_values(
-			array_filter(
-				$posts,
-				static function ( $item ) use ( $min_score ) {
-					return (int) $item['engagement_score'] >= (int) $min_score;
-				}
-			)
-		);
+	private function calculate_engagement_score( $likes, $comments ) {
+		return max( 0, (int) $likes ) + max( 0, (int) $comments );
 	}
-
-	/**
-	 * Detect platform from URL.
-	 */
-	private function detect_platform( $url ) {
-		$host = (string) wp_parse_url( $url, PHP_URL_HOST );
-		if ( false !== strpos( $host, 'instagram' ) ) {
-			return 'instagram';
-		}
-		if ( false !== strpos( $host, 'facebook' ) ) {
-			return 'facebook';
-		}
-		if ( false !== strpos( $host, 'pinterest' ) ) {
-			return 'pinterest';
-		}
-		return 'external';
-	}
-
-	/**
-	 * Parse URL list from textarea.
-	 */
-	private function extract_urls( $raw ) {
-		$lines = preg_split( '/\r\n|\r|\n/', (string) $raw );
-		$urls  = array();
-
-		foreach ( (array) $lines as $line ) {
-			$url = esc_url_raw( trim( $line ) );
-			if ( ! empty( $url ) ) {
-				$urls[] = $url;
-			}
-		}
-
-		return array_values( array_unique( $urls ) );
-	}
-
-	/**
-	 * Basic rate limiting for sync attempts.
-	 */
-	private function allow_rate_limited_sync() {
-		$count = (int) get_transient( 'sca_sync_count' );
-		if ( $count >= 10 ) {
-			return false;
-		}
-
-		set_transient( 'sca_sync_count', $count + 1, MINUTE_IN_SECONDS );
-		return true;
-	}
-
-	/**
-	 * Log plugin message.
-	 */
-	private function log_message( $message ) {
-		error_log( '[Social Content Aggregator] ' . sanitize_text_field( $message ) );
-	}
-}
-
-if ( ! class_exists( 'SCA_API_Service' ) ) {
-	class_alias( 'Social_Aggregator_API', 'SCA_API_Service' );
 }

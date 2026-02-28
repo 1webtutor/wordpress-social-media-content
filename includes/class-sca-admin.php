@@ -21,25 +21,14 @@ class Social_Aggregator_Admin {
 	 */
 	const OPTION_KEY = 'sca_settings';
 
-	/**
-	 * API service.
-	 *
-	 * @var Social_Aggregator_API
-	 */
+	/** @var Social_Aggregator_API */
 	private $api;
 
-	/**
-	 * Keyword scheduler service.
-	 *
-	 * @var Social_Aggregator_Keyword_Scheduler
-	 */
+	/** @var Social_Aggregator_Keyword_Scheduler */
 	private $keyword_scheduler;
 
 	/**
 	 * Constructor.
-	 *
-	 * @param Social_Aggregator_API               $api API service.
-	 * @param Social_Aggregator_Keyword_Scheduler $keyword_scheduler Keyword scheduler.
 	 */
 	public function __construct( $api, $keyword_scheduler ) {
 		$this->api               = $api;
@@ -100,9 +89,6 @@ class Social_Aggregator_Admin {
 
 	/**
 	 * Sanitize settings.
-	 *
-	 * @param array<string,mixed> $input Raw input.
-	 * @return array<string,mixed>
 	 */
 	public function sanitize_settings( $input ) {
 		$old = get_option( self::OPTION_KEY, array() );
@@ -125,23 +111,31 @@ class Social_Aggregator_Admin {
 			$out['fallback_feed_urls'] = sanitize_textarea_field( wp_unslash( $input['fallback_feed_urls'] ) );
 		}
 
-		$token_keys = array( 'meta_access_token', 'pinterest_access_token' );
-		foreach ( $token_keys as $token_key ) {
-			$new_value = isset( $input[ $token_key ] ) ? sanitize_text_field( wp_unslash( $input[ $token_key ] ) ) : '';
-			if ( '' === $new_value && isset( $old[ $token_key ] ) ) {
-				$out[ $token_key ] = (string) $old[ $token_key ];
+		$secure_keys = array(
+			'meta_access_token',
+			'pinterest_access_token',
+			'decodo_api_key',
+			'apify_api_token',
+			'scrape_do_api_token',
+		);
+
+		foreach ( $secure_keys as $key ) {
+			$value = isset( $input[ $key ] ) ? sanitize_text_field( wp_unslash( $input[ $key ] ) ) : '';
+			if ( '' === $value && isset( $old[ $key ] ) ) {
+				$out[ $key ] = (string) $old[ $key ];
 			} else {
-				$out[ $token_key ] = $new_value;
+				$out[ $key ] = $value;
 			}
 		}
 
-		$out['cache_ttl']      = isset( $input['cache_ttl'] ) ? (string) max( 300, absint( $input['cache_ttl'] ) ) : ( isset( $old['cache_ttl'] ) ? (string) max( 300, absint( $old['cache_ttl'] ) ) : (string) HOUR_IN_SECONDS );
-		$out['sync_limit']     = isset( $input['sync_limit'] ) ? (string) max( 1, min( 50, absint( $input['sync_limit'] ) ) ) : ( isset( $old['sync_limit'] ) ? (string) max( 1, min( 50, absint( $old['sync_limit'] ) ) ) : '25' );
-		$out['min_engagement'] = isset( $input['min_engagement'] ) ? (string) absint( $input['min_engagement'] ) : ( isset( $old['min_engagement'] ) ? (string) absint( $old['min_engagement'] ) : '0' );
+		$out['cache_ttl']      = (string) max( 300, absint( isset( $input['cache_ttl'] ) ? $input['cache_ttl'] : ( isset( $old['cache_ttl'] ) ? $old['cache_ttl'] : HOUR_IN_SECONDS ) ) );
+		$out['sync_limit']     = (string) max( 1, min( 50, absint( isset( $input['sync_limit'] ) ? $input['sync_limit'] : ( isset( $old['sync_limit'] ) ? $old['sync_limit'] : 25 ) ) ) );
+		$out['min_engagement'] = (string) absint( isset( $input['min_engagement'] ) ? $input['min_engagement'] : ( isset( $old['min_engagement'] ) ? $old['min_engagement'] : 0 ) );
 
-		$publish_mode         = isset( $input['publish_mode'] ) ? sanitize_key( $input['publish_mode'] ) : ( isset( $old['publish_mode'] ) ? sanitize_key( $old['publish_mode'] ) : 'draft' );
-		$out['publish_mode']  = in_array( $publish_mode, array( 'draft', 'publish', 'schedule' ), true ) ? $publish_mode : 'draft';
-		$frequency            = isset( $input['schedule_frequency'] ) ? sanitize_key( $input['schedule_frequency'] ) : ( isset( $old['schedule_frequency'] ) ? sanitize_key( $old['schedule_frequency'] ) : 'once' );
+		$publish_mode          = isset( $input['publish_mode'] ) ? sanitize_key( $input['publish_mode'] ) : ( isset( $old['publish_mode'] ) ? sanitize_key( $old['publish_mode'] ) : 'draft' );
+		$out['publish_mode']   = in_array( $publish_mode, array( 'draft', 'publish', 'schedule' ), true ) ? $publish_mode : 'draft';
+
+		$frequency                = isset( $input['schedule_frequency'] ) ? sanitize_key( $input['schedule_frequency'] ) : ( isset( $old['schedule_frequency'] ) ? sanitize_key( $old['schedule_frequency'] ) : 'once' );
 		$out['schedule_frequency'] = in_array( $frequency, array( 'once', 'daily', 'weekly' ), true ) ? $frequency : 'once';
 
 		$time = isset( $input['schedule_time'] ) ? sanitize_text_field( wp_unslash( $input['schedule_time'] ) ) : ( isset( $old['schedule_time'] ) ? (string) $old['schedule_time'] : '09:00' );
@@ -152,13 +146,15 @@ class Social_Aggregator_Admin {
 
 		$out['enable_feed_ingest'] = isset( $input['enable_feed_ingest'] ) ? '1' : '0';
 
+		$out['decodo_monthly_limit']    = (string) max( 1, absint( isset( $input['decodo_monthly_limit'] ) ? $input['decodo_monthly_limit'] : ( isset( $old['decodo_monthly_limit'] ) ? $old['decodo_monthly_limit'] : 5000 ) ) );
+		$out['apify_monthly_limit']     = (string) max( 1, absint( isset( $input['apify_monthly_limit'] ) ? $input['apify_monthly_limit'] : ( isset( $old['apify_monthly_limit'] ) ? $old['apify_monthly_limit'] : 5000 ) ) );
+		$out['scrape_do_monthly_limit'] = (string) max( 1, absint( isset( $input['scrape_do_monthly_limit'] ) ? $input['scrape_do_monthly_limit'] : ( isset( $old['scrape_do_monthly_limit'] ) ? $old['scrape_do_monthly_limit'] : 5000 ) ) );
+
 		return $out;
 	}
 
 	/**
 	 * Render settings page.
-	 *
-	 * @return void
 	 */
 	public function render_settings_page() {
 		if ( ! current_user_can( 'manage_options' ) ) {
@@ -176,8 +172,18 @@ class Social_Aggregator_Admin {
 					<tr><th><?php esc_html_e( 'Facebook Page ID', 'social-content-aggregator' ); ?></th><td><input type="text" class="regular-text" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[facebook_page_id]" value="<?php echo esc_attr( isset( $options['facebook_page_id'] ) ? $options['facebook_page_id'] : '' ); ?>" /></td></tr>
 					<tr><th><?php esc_html_e( 'Instagram Business Account ID', 'social-content-aggregator' ); ?></th><td><input type="text" class="regular-text" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[instagram_account_id]" value="<?php echo esc_attr( isset( $options['instagram_account_id'] ) ? $options['instagram_account_id'] : '' ); ?>" /></td></tr>
 					<tr><th><?php esc_html_e( 'Pinterest Board ID', 'social-content-aggregator' ); ?></th><td><input type="text" class="regular-text" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[pinterest_board_id]" value="<?php echo esc_attr( isset( $options['pinterest_board_id'] ) ? $options['pinterest_board_id'] : '' ); ?>" /></td></tr>
-					<tr><th><?php esc_html_e( 'Meta Access Token', 'social-content-aggregator' ); ?></th><td><input type="password" class="regular-text" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[meta_access_token]" value="" /></td></tr>
-					<tr><th><?php esc_html_e( 'Pinterest Access Token', 'social-content-aggregator' ); ?></th><td><input type="password" class="regular-text" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[pinterest_access_token]" value="" /></td></tr>
+					<tr><th><?php esc_html_e( 'Meta Access Token', 'social-content-aggregator' ); ?></th><td><input type="password" class="regular-text" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[meta_access_token]" value="" placeholder="<?php esc_attr_e( 'Leave blank to retain current', 'social-content-aggregator' ); ?>" /></td></tr>
+					<tr><th><?php esc_html_e( 'Pinterest Access Token', 'social-content-aggregator' ); ?></th><td><input type="password" class="regular-text" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[pinterest_access_token]" value="" placeholder="<?php esc_attr_e( 'Leave blank to retain current', 'social-content-aggregator' ); ?>" /></td></tr>
+
+					<tr><th colspan="2"><h2><?php esc_html_e( 'Scraper Providers (Pooling)', 'social-content-aggregator' ); ?></h2></th></tr>
+					<tr><th><?php esc_html_e( 'Decodo API Key', 'social-content-aggregator' ); ?></th><td><input type="password" class="regular-text" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[decodo_api_key]" value="" placeholder="<?php esc_attr_e( 'Leave blank to retain current', 'social-content-aggregator' ); ?>" /></td></tr>
+					<tr><th><?php esc_html_e( 'Apify API Token', 'social-content-aggregator' ); ?></th><td><input type="password" class="regular-text" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[apify_api_token]" value="" placeholder="<?php esc_attr_e( 'Leave blank to retain current', 'social-content-aggregator' ); ?>" /></td></tr>
+					<tr><th><?php esc_html_e( 'Scrape.do API Token', 'social-content-aggregator' ); ?></th><td><input type="password" class="regular-text" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[scrape_do_api_token]" value="" placeholder="<?php esc_attr_e( 'Leave blank to retain current', 'social-content-aggregator' ); ?>" /></td></tr>
+					<tr><th><?php esc_html_e( 'Decodo Monthly API Call Limit', 'social-content-aggregator' ); ?></th><td><input type="number" min="1" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[decodo_monthly_limit]" value="<?php echo esc_attr( isset( $options['decodo_monthly_limit'] ) ? $options['decodo_monthly_limit'] : 5000 ); ?>" /></td></tr>
+					<tr><th><?php esc_html_e( 'Apify Monthly API Call Limit', 'social-content-aggregator' ); ?></th><td><input type="number" min="1" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[apify_monthly_limit]" value="<?php echo esc_attr( isset( $options['apify_monthly_limit'] ) ? $options['apify_monthly_limit'] : 5000 ); ?>" /></td></tr>
+					<tr><th><?php esc_html_e( 'Scrape.do Monthly API Call Limit', 'social-content-aggregator' ); ?></th><td><input type="number" min="1" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[scrape_do_monthly_limit]" value="<?php echo esc_attr( isset( $options['scrape_do_monthly_limit'] ) ? $options['scrape_do_monthly_limit'] : 5000 ); ?>" /></td></tr>
+
+					<tr><th colspan="2"><h2><?php esc_html_e( 'General Publishing', 'social-content-aggregator' ); ?></h2></th></tr>
 					<tr><th><?php esc_html_e( 'Cache TTL (seconds)', 'social-content-aggregator' ); ?></th><td><input type="number" min="300" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[cache_ttl]" value="<?php echo esc_attr( isset( $options['cache_ttl'] ) ? $options['cache_ttl'] : HOUR_IN_SECONDS ); ?>" /></td></tr>
 					<tr><th><?php esc_html_e( 'Sync Limit Per Platform', 'social-content-aggregator' ); ?></th><td><input type="number" min="1" max="50" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[sync_limit]" value="<?php echo esc_attr( isset( $options['sync_limit'] ) ? $options['sync_limit'] : 25 ); ?>" /></td></tr>
 					<tr><th><?php esc_html_e( 'Minimum Engagement Score', 'social-content-aggregator' ); ?></th><td><input type="number" min="0" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[min_engagement]" value="<?php echo esc_attr( isset( $options['min_engagement'] ) ? $options['min_engagement'] : '0' ); ?>" /></td></tr>
@@ -185,6 +191,8 @@ class Social_Aggregator_Admin {
 					<tr><th><?php esc_html_e( 'Schedule Time (HH:MM)', 'social-content-aggregator' ); ?></th><td><input type="time" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[schedule_time]" value="<?php echo esc_attr( isset( $options['schedule_time'] ) ? $options['schedule_time'] : '09:00' ); ?>" /></td></tr>
 					<tr><th><?php esc_html_e( 'Schedule Frequency', 'social-content-aggregator' ); ?></th><td><select name="<?php echo esc_attr( self::OPTION_KEY ); ?>[schedule_frequency]"><option value="once" <?php selected( isset( $options['schedule_frequency'] ) ? $options['schedule_frequency'] : 'once', 'once' ); ?>><?php esc_html_e( 'Once', 'social-content-aggregator' ); ?></option><option value="daily" <?php selected( isset( $options['schedule_frequency'] ) ? $options['schedule_frequency'] : '', 'daily' ); ?>><?php esc_html_e( 'Daily', 'social-content-aggregator' ); ?></option><option value="weekly" <?php selected( isset( $options['schedule_frequency'] ) ? $options['schedule_frequency'] : '', 'weekly' ); ?>><?php esc_html_e( 'Weekly', 'social-content-aggregator' ); ?></option></select></td></tr>
 					<tr><th><?php esc_html_e( 'Target Post Type', 'social-content-aggregator' ); ?></th><td><select name="<?php echo esc_attr( self::OPTION_KEY ); ?>[target_post_type]"><?php foreach ( $post_types as $post_type ) : ?><option value="<?php echo esc_attr( $post_type->name ); ?>" <?php selected( isset( $options['target_post_type'] ) ? $options['target_post_type'] : 'social_posts', $post_type->name ); ?>><?php echo esc_html( $post_type->labels->singular_name ); ?></option><?php endforeach; ?></select></td></tr>
+					<tr><th><?php esc_html_e( 'Enable RSS/Atom Ingestion', 'social-content-aggregator' ); ?></th><td><label><input type="checkbox" name="<?php echo esc_attr( self::OPTION_KEY ); ?>[enable_feed_ingest]" value="1" <?php checked( isset( $options['enable_feed_ingest'] ) ? $options['enable_feed_ingest'] : '0', '1' ); ?> /> <?php esc_html_e( 'Enabled', 'social-content-aggregator' ); ?></label></td></tr>
+					<tr><th><?php esc_html_e( 'Fallback Feed URLs', 'social-content-aggregator' ); ?></th><td><textarea name="<?php echo esc_attr( self::OPTION_KEY ); ?>[fallback_feed_urls]" rows="4" class="large-text"><?php echo esc_textarea( isset( $options['fallback_feed_urls'] ) ? $options['fallback_feed_urls'] : '' ); ?></textarea></td></tr>
 				</table>
 				<?php submit_button(); ?>
 			</form>
@@ -257,8 +265,6 @@ class Social_Aggregator_Admin {
 
 	/**
 	 * Handle manual sync.
-	 *
-	 * @return void
 	 */
 	public function handle_manual_sync() {
 		if ( ! current_user_can( 'manage_options' ) ) {

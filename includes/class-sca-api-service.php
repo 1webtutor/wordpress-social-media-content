@@ -21,6 +21,13 @@ class Social_Aggregator_API {
 	 */
 	const OPTION_KEY = 'sca_settings';
 
+	/**
+	 * Monthly usage option key.
+	 *
+	 * @var string
+	 */
+	const SCRAPER_USAGE_OPTION = 'sca_scraper_monthly_usage';
+
 	/** @var SCA_CPT */
 	private $cpt;
 
@@ -45,8 +52,6 @@ class Social_Aggregator_API {
 
 	/**
 	 * Sync content from all configured sources.
-	 *
-	 * API is automatically preferred when IDs/tokens exist; scraping is default fallback.
 	 *
 	 * @param bool $force_refresh Force cache clear.
 	 * @return void
@@ -76,7 +81,7 @@ class Social_Aggregator_API {
 		$merged = $this->filter_by_engagement( $merged, isset( $settings['min_engagement'] ) ? absint( $settings['min_engagement'] ) : 0 );
 
 		foreach ( array_values( $merged ) as $index => $item ) {
-			$item['caption'] = $this->processor->clean_caption( $item['caption'] );
+			$item['caption'] = $this->processor->clean_caption( isset( $item['caption'] ) ? (string) $item['caption'] : '' );
 			$hashtags        = $this->hashtag_engine->extract_hashtags( $item['caption'] );
 			$this->hashtag_engine->update_trending_stats( $hashtags, (int) $item['engagement_score'] );
 			$top_hashtags = $this->hashtag_engine->get_top_hashtags( 5 );
@@ -118,7 +123,7 @@ class Social_Aggregator_API {
 		if ( $this->should_use_api_for_platform( $platform, $settings ) ) {
 			$posts = $this->fetch_platform_via_api( $platform );
 		} else {
-			$posts = $this->fetch_scraped_posts_for_platform( $platform, $settings, $force_refresh );
+			$posts = $this->fetch_pooled_scraper_posts( '', array( $platform ), $settings );
 		}
 
 		if ( ! is_wp_error( $posts ) ) {
@@ -129,46 +134,118 @@ class Social_Aggregator_API {
 	}
 
 	/**
-	 * Determine whether API should be preferred.
+	 * Fetch keyword-specific posts with API-first and pooled scraper fallback.
 	 *
-	 * @param string               $platform Platform.
-	 * @param array<string,mixed> $settings Settings.
-	 * @return bool
+	 * @param string            $keyword Keyword.
+	 * @param array<int,string> $platforms Platforms.
+	 * @param int               $max_posts Max posts.
+	 * @param int               $min_engagement Minimum engagement threshold.
+	 * @return array<int,array<string,mixed>>
 	 */
-	private function should_use_api_for_platform( $platform, $settings ) {
-		switch ( $platform ) {
-			case 'instagram':
-				return ! empty( $settings['instagram_account_id'] ) && ! empty( $settings['meta_access_token'] );
-			case 'facebook':
-				return ! empty( $settings['facebook_page_id'] ) && ! empty( $settings['meta_access_token'] );
-			case 'pinterest':
-				return ! empty( $settings['pinterest_board_id'] ) && ! empty( $settings['pinterest_access_token'] );
-			default:
-				return false;
+	public function fetch_keyword_posts( $keyword, $platforms, $max_posts = 10, $min_engagement = 0 ) {
+		$keyword   = sanitize_text_field( $keyword );
+		$platforms = array_values( array_unique( array_map( 'sanitize_key', (array) $platforms ) ) );
+		$max_posts = max( 1, min( 50, absint( $max_posts ) ) );
+
+		$cache_key = 'sca_kw_' . md5( wp_json_encode( array( $keyword, $platforms, $max_posts, $min_engagement ) ) );
+		$cached    = get_transient( $cache_key );
+		if ( false !== $cached && is_array( $cached ) ) {
+			return $cached;
 		}
+
+		$settings = get_option( self::OPTION_KEY, array() );
+		$items    = array();
+
+		foreach ( $platforms as $platform ) {
+			$posts = array();
+			if ( $this->should_use_api_for_platform( $platform, $settings ) ) {
+				$posts = $this->fetch_platform_via_api( $platform );
+			}
+
+			if ( empty( $posts ) || is_wp_error( $posts ) ) {
+				$posts = $this->fetch_pooled_scraper_posts( $keyword, array( $platform ), $settings );
+			}
+
+			if ( is_wp_error( $posts ) || ! is_array( $posts ) ) {
+				continue;
+			}
+
+			foreach ( $posts as $post ) {
+				$caption = isset( $post['caption'] ) ? (string) $post['caption'] : '';
+				if ( ! $this->keyword_match_in_content( $caption, $keyword ) ) {
+					continue;
+				}
+
+				$engagement = isset( $post['engagement_score'] ) ? (int) $post['engagement_score'] : 0;
+				if ( $engagement < $min_engagement ) {
+					continue;
+				}
+
+				$relevance = $this->calculate_relevance_score( $caption, $keyword );
+				if ( $relevance < 50 ) {
+					continue;
+				}
+
+				$post['relevance_score'] = $relevance;
+				$post['final_score']     = ( $relevance * 0.6 ) + ( $engagement * 0.4 );
+				$items[]                 = $post;
+			}
+		}
+
+		usort(
+			$items,
+			static function ( $a, $b ) {
+				$left  = isset( $a['final_score'] ) ? (float) $a['final_score'] : 0;
+				$right = isset( $b['final_score'] ) ? (float) $b['final_score'] : 0;
+				if ( $left === $right ) {
+					return 0;
+				}
+				return ( $left > $right ) ? -1 : 1;
+			}
+		);
+
+		$items = array_slice( $this->deduplicate_posts( $items ), 0, $max_posts );
+		set_transient( $cache_key, $items, 15 * MINUTE_IN_SECONDS );
+		return $items;
 	}
 
 	/**
-	 * Fetch one platform via API.
+	 * Calculate relevance score.
 	 *
-	 * @param string $platform Platform.
-	 * @return array<int,array<string,mixed>>|WP_Error
+	 * @param string $content Content.
+	 * @param string $keyword Keyword.
+	 * @return int
 	 */
-	private function fetch_platform_via_api( $platform ) {
-		switch ( $platform ) {
-			case 'instagram':
-				return $this->fetch_instagram_posts();
-			case 'facebook':
-				return $this->fetch_facebook_posts();
-			case 'pinterest':
-				return $this->fetch_pinterest_posts();
-			default:
-				return array();
+	public function calculate_relevance_score( $content, $keyword ) {
+		$text          = strtolower( preg_replace( '/[^a-z0-9#\s]/i', ' ', (string) $content ) );
+		$keyword_text  = strtolower( preg_replace( '/[^a-z0-9\s]/i', ' ', (string) $keyword ) );
+		$keyword_words = array_filter( preg_split( '/\s+/', $keyword_text ) );
+		$score         = 0;
+
+		if ( false !== strpos( $text, trim( $keyword_text ) ) ) {
+			$score += 50;
 		}
+
+		foreach ( $keyword_words as $word ) {
+			if ( false !== strpos( $text, $word ) ) {
+				$score += 20;
+			}
+			if ( false !== strpos( $text, '#' . $word ) ) {
+				$score += 10;
+			}
+			if ( preg_match( '/\b' . preg_quote( $word, '/' ) . '[a-z0-9]*\b/', $text ) ) {
+				$score += 5;
+			}
+		}
+
+		return max( 0, (int) $score );
 	}
 
 	/**
 	 * Fetch feed fallback posts.
+	 *
+	 * @param bool $force_refresh Force refresh.
+	 * @return array<int,array<string,mixed>>|WP_Error
 	 */
 	private function fetch_fallback_feed_posts( $force_refresh = false ) {
 		$settings = get_option( self::OPTION_KEY, array() );
@@ -223,73 +300,303 @@ class Social_Aggregator_API {
 	}
 
 	/**
-	 * Scrape posts filtered by platform.
+	 * Fetch pooled scraper posts from Decodo, Apify, Scrape.do.
 	 *
-	 * @param string               $platform Platform.
-	 * @param array<string,mixed> $settings Settings.
-	 * @param bool                 $force_refresh Force refresh.
-	 * @return array<int,array<string,mixed>>|WP_Error
+	 * @param string               $keyword Keyword.
+	 * @param array<int,string>    $platforms Platforms.
+	 * @param array<string,mixed>  $settings Settings.
+	 * @return array<int,array<string,mixed>>
 	 */
-	private function fetch_scraped_posts_for_platform( $platform, $settings, $force_refresh = false ) {
-		$enabled = ! isset( $settings['enable_scraping'] ) || '1' === (string) $settings['enable_scraping'];
-		if ( ! $enabled ) {
+	private function fetch_pooled_scraper_posts( $keyword, $platforms, $settings ) {
+		$providers = $this->get_enabled_scraper_providers( $settings );
+		if ( empty( $providers ) ) {
 			return array();
 		}
 
-		$urls = $this->extract_urls( isset( $settings['scrape_urls'] ) ? $settings['scrape_urls'] : '' );
-		if ( empty( $urls ) ) {
-			return array();
-		}
+		$max_posts = isset( $settings['sync_limit'] ) ? max( 1, min( 50, absint( $settings['sync_limit'] ) ) ) : 25;
+		$all       = array();
+		$index     = 0;
 
-		$platform_urls = array_filter(
-			$urls,
-			function ( $url ) use ( $platform ) {
-				return $platform === $this->detect_platform( $url );
+		foreach ( range( 1, $max_posts ) as $unused ) {
+			if ( empty( $providers ) ) {
+				break;
 			}
+
+			$provider = $providers[ $index % count( $providers ) ];
+			$result   = $this->fetch_from_scraper_provider( $provider, $keyword, $platforms, $settings );
+			if ( ! empty( $result ) ) {
+				$all = array_merge( $all, $result );
+			}
+			$index++;
+		}
+
+		return $this->deduplicate_posts( $all );
+	}
+
+	/**
+	 * Get available scraper providers respecting configured call limits.
+	 *
+	 * @param array<string,mixed> $settings Settings.
+	 * @return array<int,string>
+	 */
+	private function get_enabled_scraper_providers( $settings ) {
+		$providers = array(
+			'decodo'   => isset( $settings['decodo_api_key'] ) ? (string) $settings['decodo_api_key'] : '',
+			'apify'    => isset( $settings['apify_api_token'] ) ? (string) $settings['apify_api_token'] : '',
+			'scrape_do'=> isset( $settings['scrape_do_api_token'] ) ? (string) $settings['scrape_do_api_token'] : '',
 		);
 
-		if ( empty( $platform_urls ) ) {
+		$enabled = array();
+		foreach ( $providers as $provider => $token ) {
+			if ( empty( $token ) ) {
+				continue;
+			}
+			if ( $this->can_make_scraper_call( $provider, $settings ) ) {
+				$enabled[] = $provider;
+			}
+		}
+
+		return $enabled;
+	}
+
+	/**
+	 * Provider-level fetch adapter.
+	 *
+	 * @param string              $provider Provider key.
+	 * @param string              $keyword Keyword.
+	 * @param array<int,string>   $platforms Platforms.
+	 * @param array<string,mixed> $settings Settings.
+	 * @return array<int,array<string,mixed>>
+	 */
+	private function fetch_from_scraper_provider( $provider, $keyword, $platforms, $settings ) {
+		if ( ! $this->register_scraper_call( $provider ) ) {
 			return array();
 		}
 
-		$key = 'sca_scrape_' . sanitize_key( $platform ) . '_' . md5( wp_json_encode( $platform_urls ) );
-		if ( $force_refresh ) {
-			delete_transient( $key );
+		if ( 'apify' === $provider ) {
+			return $this->fetch_from_apify( $keyword, $platforms, $settings );
+		}
+		if ( 'decodo' === $provider ) {
+			return $this->fetch_from_decodo( $keyword, $platforms, $settings );
+		}
+		if ( 'scrape_do' === $provider ) {
+			return $this->fetch_from_scrape_do( $keyword, $platforms, $settings );
 		}
 
-		$cached = get_transient( $key );
-		if ( false !== $cached && is_array( $cached ) ) {
-			return $cached;
+		return array();
+	}
+
+	/**
+	 * Fetch from Decodo API.
+	 */
+	private function fetch_from_decodo( $keyword, $platforms, $settings ) {
+		$token = isset( $settings['decodo_api_key'] ) ? (string) $settings['decodo_api_key'] : '';
+		if ( empty( $token ) ) {
+			return array();
+		}
+
+		$url = add_query_arg(
+			array(
+				'keyword'   => rawurlencode( $keyword ),
+				'platforms' => rawurlencode( implode( ',', $platforms ) ),
+			),
+			'https://scrape.decodo.com/social/search'
+		);
+
+		$response = wp_remote_get(
+			esc_url_raw( $url ),
+			array(
+				'timeout' => 20,
+				'headers' => array(
+					'Authorization' => 'Bearer ' . $token,
+				),
+			)
+		);
+
+		return $this->normalize_provider_response( $response, 'decodo' );
+	}
+
+	/**
+	 * Fetch from Apify API.
+	 */
+	private function fetch_from_apify( $keyword, $platforms, $settings ) {
+		$token = isset( $settings['apify_api_token'] ) ? (string) $settings['apify_api_token'] : '';
+		if ( empty( $token ) ) {
+			return array();
+		}
+
+		$url = add_query_arg(
+			array(
+				'token'    => rawurlencode( $token ),
+				'keyword'  => rawurlencode( $keyword ),
+				'platform' => rawurlencode( implode( ',', $platforms ) ),
+			),
+			'https://api.apify.com/v2/acts/social-search/run-sync-get-dataset-items'
+		);
+
+		$response = wp_remote_get( esc_url_raw( $url ), array( 'timeout' => 25 ) );
+		return $this->normalize_provider_response( $response, 'apify' );
+	}
+
+	/**
+	 * Fetch from Scrape.do API.
+	 */
+	private function fetch_from_scrape_do( $keyword, $platforms, $settings ) {
+		$token = isset( $settings['scrape_do_api_token'] ) ? (string) $settings['scrape_do_api_token'] : '';
+		if ( empty( $token ) ) {
+			return array();
+		}
+
+		$target_url = 'https://www.example.com/social-search?q=' . rawurlencode( $keyword . ' ' . implode( ' ', $platforms ) );
+		$url        = add_query_arg(
+			array(
+				'token' => rawurlencode( $token ),
+				'url'   => rawurlencode( $target_url ),
+			),
+			'https://api.scrape.do/'
+		);
+
+		$response = wp_remote_get( esc_url_raw( $url ), array( 'timeout' => 20 ) );
+		return $this->normalize_provider_response( $response, 'scrape_do' );
+	}
+
+	/**
+	 * Normalize provider response payload.
+	 *
+	 * @param array<string,mixed>|WP_Error $response Response.
+	 * @param string                       $provider Provider.
+	 * @return array<int,array<string,mixed>>
+	 */
+	private function normalize_provider_response( $response, $provider ) {
+		if ( is_wp_error( $response ) ) {
+			return array();
+		}
+		if ( 200 !== (int) wp_remote_retrieve_response_code( $response ) ) {
+			return array();
+		}
+
+		$body = json_decode( wp_remote_retrieve_body( $response ), true );
+		if ( ! is_array( $body ) ) {
+			return array();
 		}
 
 		$items = array();
-		foreach ( $platform_urls as $url ) {
-			$response = wp_remote_get( esc_url_raw( $url ), array( 'timeout' => 15 ) );
-			if ( is_wp_error( $response ) || 200 !== (int) wp_remote_retrieve_response_code( $response ) ) {
-				continue;
-			}
+		$rows  = isset( $body['data'] ) && is_array( $body['data'] ) ? $body['data'] : ( isset( $body[0] ) ? $body : array() );
 
-			$html = (string) wp_remote_retrieve_body( $response );
-			preg_match( '/<title>(.*?)<\/title>/is', $html, $title );
-			preg_match( '/property="og:image"\s+content="([^"]+)"/is', $html, $image );
+		foreach ( $rows as $row ) {
+			$caption = isset( $row['caption'] ) ? (string) $row['caption'] : ( isset( $row['text'] ) ? (string) $row['text'] : '' );
+			$link    = isset( $row['permalink'] ) ? (string) $row['permalink'] : ( isset( $row['url'] ) ? (string) $row['url'] : '' );
+			$likes   = isset( $row['like_count'] ) ? (int) $row['like_count'] : 0;
+			$comms   = isset( $row['comments_count'] ) ? (int) $row['comments_count'] : 0;
 
-			$caption = isset( $title[1] ) ? wp_strip_all_tags( html_entity_decode( $title[1], ENT_QUOTES, 'UTF-8' ) ) : '';
 			$items[] = array(
-				'external_id'      => md5( 'scrape|' . $platform . '|' . $url ),
+				'external_id'      => ! empty( $row['id'] ) ? (string) $row['id'] : md5( $provider . '|' . $link . '|' . $caption ),
 				'caption'          => $caption,
-				'media_url'        => isset( $image[1] ) ? esc_url_raw( $image[1] ) : '',
-				'permalink'        => esc_url_raw( $url ),
-				'timestamp'        => gmdate( 'c' ),
-				'like_count'       => 0,
-				'comments_count'   => 0,
-				'engagement_score' => 0,
-				'platform'         => $platform,
-				'ingest_source'    => 'scrape',
+				'media_url'        => isset( $row['media_url'] ) ? (string) $row['media_url'] : '',
+				'permalink'        => $link,
+				'timestamp'        => isset( $row['timestamp'] ) ? (string) $row['timestamp'] : gmdate( 'c' ),
+				'like_count'       => $likes,
+				'comments_count'   => $comms,
+				'engagement_score' => $likes + $comms,
+				'platform'         => isset( $row['platform'] ) ? sanitize_key( $row['platform'] ) : $this->detect_platform( $link ),
+				'ingest_source'    => $provider,
 			);
 		}
 
-		set_transient( $key, $items, HOUR_IN_SECONDS );
 		return $items;
+	}
+
+	/**
+	 * Check provider can make another call this month.
+	 *
+	 * @param string              $provider Provider.
+	 * @param array<string,mixed> $settings Settings.
+	 * @return bool
+	 */
+	private function can_make_scraper_call( $provider, $settings ) {
+		$usage = $this->get_monthly_scraper_usage();
+		$limit = isset( $settings[ $provider . '_monthly_limit' ] ) ? absint( $settings[ $provider . '_monthly_limit' ] ) : 5000;
+		$used  = isset( $usage['counts'][ $provider ] ) ? absint( $usage['counts'][ $provider ] ) : 0;
+		return $used < max( 1, $limit );
+	}
+
+	/**
+	 * Increment provider call usage.
+	 *
+	 * @param string $provider Provider.
+	 * @return bool
+	 */
+	private function register_scraper_call( $provider ) {
+		$usage = $this->get_monthly_scraper_usage();
+		if ( ! isset( $usage['counts'][ $provider ] ) ) {
+			$usage['counts'][ $provider ] = 0;
+		}
+		$usage['counts'][ $provider ]++;
+		update_option( self::SCRAPER_USAGE_OPTION, $usage, false );
+		return true;
+	}
+
+	/**
+	 * Get monthly usage structure.
+	 *
+	 * @return array<string,mixed>
+	 */
+	private function get_monthly_scraper_usage() {
+		$current_month = gmdate( 'Y-m' );
+		$usage         = get_option( self::SCRAPER_USAGE_OPTION, array() );
+
+		if ( empty( $usage ) || ! isset( $usage['month'] ) || $usage['month'] !== $current_month ) {
+			$usage = array(
+				'month'  => $current_month,
+				'counts' => array(
+					'decodo'    => 0,
+					'apify'     => 0,
+					'scrape_do' => 0,
+				),
+			);
+			update_option( self::SCRAPER_USAGE_OPTION, $usage, false );
+		}
+
+		return $usage;
+	}
+
+	/**
+	 * Determine whether API should be preferred.
+	 *
+	 * @param string               $platform Platform.
+	 * @param array<string,mixed> $settings Settings.
+	 * @return bool
+	 */
+	private function should_use_api_for_platform( $platform, $settings ) {
+		switch ( $platform ) {
+			case 'instagram':
+				return ! empty( $settings['instagram_account_id'] ) && ! empty( $settings['meta_access_token'] );
+			case 'facebook':
+				return ! empty( $settings['facebook_page_id'] ) && ! empty( $settings['meta_access_token'] );
+			case 'pinterest':
+				return ! empty( $settings['pinterest_board_id'] ) && ! empty( $settings['pinterest_access_token'] );
+			default:
+				return false;
+		}
+	}
+
+	/**
+	 * Fetch one platform via API.
+	 *
+	 * @param string $platform Platform.
+	 * @return array<int,array<string,mixed>>|WP_Error
+	 */
+	private function fetch_platform_via_api( $platform ) {
+		switch ( $platform ) {
+			case 'instagram':
+				return $this->fetch_instagram_posts();
+			case 'facebook':
+				return $this->fetch_facebook_posts();
+			case 'pinterest':
+				return $this->fetch_pinterest_posts();
+			default:
+				return array();
+		}
 	}
 
 	/**
@@ -450,11 +757,10 @@ class Social_Aggregator_API {
 		$seen   = array();
 
 		foreach ( $posts as $post ) {
-			$key = ! empty( $post['permalink'] ) ? 'url:' . $post['permalink'] : 'id:' . $post['external_id'];
+			$key = ! empty( $post['permalink'] ) ? 'url:' . $post['permalink'] : 'id:' . ( isset( $post['external_id'] ) ? $post['external_id'] : '' );
 			if ( isset( $seen[ $key ] ) ) {
 				continue;
 			}
-
 			$seen[ $key ] = true;
 			$unique[]     = $post;
 		}
@@ -470,10 +776,34 @@ class Social_Aggregator_API {
 			array_filter(
 				$posts,
 				static function ( $item ) use ( $min_score ) {
-					return (int) $item['engagement_score'] >= (int) $min_score;
+					$score = isset( $item['engagement_score'] ) ? (int) $item['engagement_score'] : 0;
+					return $score >= (int) $min_score;
 				}
 			)
 		);
+	}
+
+	/**
+	 * Quick keyword in-content matcher.
+	 *
+	 * @param string $content Content.
+	 * @param string $keyword Keyword.
+	 * @return bool
+	 */
+	private function keyword_match_in_content( $content, $keyword ) {
+		$content = strtolower( (string) $content );
+		$keyword = strtolower( (string) $keyword );
+		if ( false !== strpos( $content, $keyword ) ) {
+			return true;
+		}
+
+		foreach ( array_filter( preg_split( '/\s+/', $keyword ) ) as $part ) {
+			if ( false !== strpos( $content, $part ) ) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	/**
@@ -521,130 +851,6 @@ class Social_Aggregator_API {
 
 		set_transient( 'sca_sync_count', $count + 1, MINUTE_IN_SECONDS );
 		return true;
-	}
-
-
-	/**
-	 * Fetch keyword-specific posts using API only.
-	 *
-	 * @param string            $keyword Keyword.
-	 * @param array<int,string> $platforms Platforms.
-	 * @param int               $max_posts Max posts.
-	 * @param int               $min_engagement Minimum engagement threshold.
-	 * @return array<int,array<string,mixed>>
-	 */
-	public function fetch_keyword_posts( $keyword, $platforms, $max_posts = 10, $min_engagement = 0 ) {
-		$keyword    = sanitize_text_field( $keyword );
-		$platforms  = array_values( array_unique( array_map( 'sanitize_key', (array) $platforms ) ) );
-		$max_posts  = max( 1, min( 50, absint( $max_posts ) ) );
-		$cache_key  = 'sca_kw_' . md5( wp_json_encode( array( $keyword, $platforms, $max_posts, $min_engagement ) ) );
-		$cached     = get_transient( $cache_key );
-
-		if ( false !== $cached && is_array( $cached ) ) {
-			return $cached;
-		}
-
-		$settings = get_option( self::OPTION_KEY, array() );
-		$items    = array();
-
-		foreach ( $platforms as $platform ) {
-			if ( ! $this->should_use_api_for_platform( $platform, $settings ) ) {
-				continue;
-			}
-
-			$posts = $this->fetch_platform_via_api( $platform );
-			if ( is_wp_error( $posts ) || ! is_array( $posts ) ) {
-				continue;
-			}
-
-			foreach ( $posts as $post ) {
-				$caption = isset( $post['caption'] ) ? (string) $post['caption'] : '';
-				if ( ! $this->keyword_match_in_content( $caption, $keyword ) ) {
-					continue;
-				}
-				if ( (int) $post['engagement_score'] < $min_engagement ) {
-					continue;
-				}
-				$post['relevance_score'] = $this->calculate_relevance_score( $caption, $keyword );
-				if ( (int) $post['relevance_score'] < 50 ) {
-					continue;
-				}
-				$post['final_score'] = ( (float) $post['relevance_score'] * 0.6 ) + ( (float) $post['engagement_score'] * 0.4 );
-				$items[] = $post;
-			}
-		}
-
-		usort(
-			$items,
-			static function ( $a, $b ) {
-				$left  = isset( $a['final_score'] ) ? (float) $a['final_score'] : 0;
-				$right = isset( $b['final_score'] ) ? (float) $b['final_score'] : 0;
-				if ( $left === $right ) {
-					return 0;
-				}
-				return ( $left > $right ) ? -1 : 1;
-			}
-		);
-
-		$items = array_slice( $items, 0, $max_posts );
-		set_transient( $cache_key, $items, 15 * MINUTE_IN_SECONDS );
-
-		return $items;
-	}
-
-	/**
-	 * Calculate relevance score for keyword matching.
-	 *
-	 * @param string $content Content.
-	 * @param string $keyword Keyword.
-	 * @return int
-	 */
-	public function calculate_relevance_score( $content, $keyword ) {
-		$text          = strtolower( preg_replace( '/[^a-z0-9#\s]/i', ' ', (string) $content ) );
-		$keyword_text  = strtolower( preg_replace( '/[^a-z0-9\s]/i', ' ', (string) $keyword ) );
-		$keyword_words = array_filter( preg_split( '/\s+/', $keyword_text ) );
-		$score         = 0;
-
-		if ( false !== strpos( $text, trim( $keyword_text ) ) ) {
-			$score += 50;
-		}
-
-		foreach ( $keyword_words as $word ) {
-			if ( false !== strpos( $text, $word ) ) {
-				$score += 20;
-			}
-			if ( false !== strpos( $text, '#' . $word ) ) {
-				$score += 10;
-			}
-			if ( preg_match( '/' . preg_quote( $word, '/' ) . '[a-z0-9]*/', $text ) ) {
-				$score += 5;
-			}
-		}
-
-		return max( 0, (int) $score );
-	}
-
-	/**
-	 * Quick keyword in-content matcher.
-	 *
-	 * @param string $content Content.
-	 * @param string $keyword Keyword.
-	 * @return bool
-	 */
-	private function keyword_match_in_content( $content, $keyword ) {
-		$content = strtolower( (string) $content );
-		$keyword = strtolower( (string) $keyword );
-		if ( false !== strpos( $content, $keyword ) ) {
-			return true;
-		}
-
-		foreach ( array_filter( preg_split( '/\s+/', $keyword ) ) as $part ) {
-			if ( false !== strpos( $content, $part ) ) {
-				return true;
-			}
-		}
-
-		return false;
 	}
 
 	/**

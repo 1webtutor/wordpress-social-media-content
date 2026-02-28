@@ -361,3 +361,72 @@ Keyword Scheduler pipeline is **API-only**:
 
 - uses official API-backed fetch methods
 - does not use scraping paths for keyword jobs
+
+---
+
+## 14) Decodo + Apify + Scrape.do Integration (Pooled Scraper Layer)
+
+The plugin now supports three external scraping providers as optional data-acquisition backends:
+
+- **Decodo API**
+- **Apify API**
+- **Scrape.do API**
+
+### Admin controls
+
+In **Social Aggregator → General Settings**, you can set:
+
+- Decodo API key
+- Apify API token
+- Scrape.do API token
+- Monthly API call limit per provider:
+  - `decodo_monthly_limit`
+  - `apify_monthly_limit`
+  - `scrape_do_monthly_limit`
+
+### Pooling behavior
+
+When scraper-backed fetching is needed, requests are distributed in a provider pool (round-robin style) across enabled providers that still have available monthly quota.
+
+### Monthly limit tracking
+
+- Usage is tracked in option: `sca_scraper_monthly_usage`
+- Counts auto-reset when month changes (`Y-m` bucket)
+- Provider calls are blocked after configured monthly limit is reached
+
+### Keyword scheduler relevance with pooled sources
+
+For keyword workflows, fetch logic is:
+
+1. Use official platform APIs when credentials exist.
+2. If unavailable/empty, fallback to pooled provider sources.
+3. Compute:
+   - `relevance_score`
+   - `engagement_score`
+   - `final_score = relevance*0.6 + engagement*0.4`
+4. Sort and take top-N.
+
+---
+
+## Additional Suggestions / Future Enhancements
+
+1. **Provider Health Dashboard**
+   - Show per-provider success/error rate and remaining monthly quota in admin.
+
+2. **Queue-aware Backoff**
+   - Add exponential retry/backoff for transient network failures on provider APIs.
+
+3. **Provider Priority Weights**
+   - Allow admin-defined weights (e.g., Apify 60%, Decodo 30%, Scrape.do 10%) in pooling strategy.
+
+4. **Per-Keyword Provider Override**
+   - Let each keyword scheduler choose allowed providers and per-keyword call budget.
+
+5. **Editorial Review Workflow**
+   - Add optional confidence threshold to force low-confidence posts to draft regardless of publish mode.
+
+6. **Structured Log Explorer**
+   - Build admin log filters by keyword/platform/provider/date with CSV export.
+
+7. **REST Endpoint for Scheduler Stats**
+   - Expose keyword scheduler metrics to headless dashboards.

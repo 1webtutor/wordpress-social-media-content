@@ -430,3 +430,58 @@ For keyword workflows, fetch logic is:
 
 7. **REST Endpoint for Scheduler Stats**
    - Expose keyword scheduler metrics to headless dashboards.
+
+---
+
+## 15) Content Workbench (Keyword Preview + Edit + Import)
+
+A dedicated admin page is now available:
+
+- **Social Aggregator → Content Workbench**
+
+This page helps you validate retrieval quality and scraper/provider health before publishing.
+
+### What you can do on this page
+
+1. Enter a keyword and fetch preview results.
+2. Choose platforms and max result count.
+3. Select visible columns in the result table.
+4. Inspect **which source/provider** returned each row (`api`, `decodo`, `apify`, `scrape_do`, etc.).
+5. Edit caption/content inline per row.
+6. Select only required rows and import into chosen post type/status.
+
+### Diagnostics built in
+
+- Source diagnostics summary is shown for the preview dataset.
+- This allows quick verification that:
+  - official API paths are working,
+  - pooled providers are active,
+  - fallback acquisition is functioning.
+
+### Why this is useful
+
+- Acts as an editorial quality gate before scheduling.
+- Helps operations teams detect provider outages or exhausted quotas.
+- Supports manual curation without leaving WordPress admin.
+
+---
+
+## More Related Suggestions
+
+1. **Provider Test Button per Service**
+   - Add explicit “Test Decodo / Test Apify / Test Scrape.do” buttons with latency and status feedback.
+
+2. **Column Templates**
+   - Save reusable column presets in Content Workbench (e.g., Moderation View, SEO View, Quick Publish View).
+
+3. **Bulk Rewrite Assistant**
+   - Add a pluggable pre-publish rewrite transform to normalize tone/length before import.
+
+4. **Quota Forecast Panel**
+   - Show estimated days-to-quota-exhaustion based on rolling call volume.
+
+5. **Auto-Draft Queue from Workbench**
+   - Allow selecting rows and sending directly to keyword scheduler queue as pre-approved draft jobs.
+
+6. **Provider-level Error Ledger**
+   - Persist provider errors for better troubleshooting and SLA tracking.
